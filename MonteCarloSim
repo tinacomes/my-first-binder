@@ -1,0 +1,74 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from DisasterModelRep import DisasterModel  # assuming your model is in disaster_model.py
+
+#Monte Carlo Simulation over different fractions of agents showing exploratory behaviour in the reinforcement learning part of the model
+
+# Parameters for the simulation.
+exploratory_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+num_steps = 50
+num_runs = 20
+
+# Dictionaries to store metrics per fraction.
+results_trust_ai = {frac: [] for frac in exploratory_fractions}
+results_rewards = {frac: [] for frac in exploratory_fractions}
+results_ai_calls = {frac: [] for frac in exploratory_fractions}
+
+# Monte Carlo simulation: run multiple runs per exploratory fraction.
+for frac in exploratory_fractions:
+    for run in range(num_runs):
+        model = DisasterModel(num_humans=75, num_ai=1, noise=0.1, exploratory_fraction=frac)
+        # Run the model for a fixed number of steps.
+        for step in range(num_steps):
+            model.step()
+        # Compute final metrics for this run.
+        avg_trust_ai = np.mean(model.avg_trust_ai_over_time)
+        total_reward = sum(model.tokens_received_over_time)
+        total_ai_calls = sum(model.info_calls_ai_over_time)
+        
+        # Save the results.
+        results_trust_ai[frac].append(avg_trust_ai)
+        results_rewards[frac].append(total_reward)
+        results_ai_calls[frac].append(total_ai_calls)
+        
+        print(f"Fraction {frac}, Run {run+1}: Avg Trust in AI = {avg_trust_ai:.2f}, Total Reward = {total_reward}, Total AI Calls = {total_ai_calls}")
+
+# Now, compute the average and standard deviation for each metric.
+avg_trust_ai_mean = []
+avg_trust_ai_std = []
+avg_rewards_mean = []
+avg_rewards_std = []
+avg_ai_calls_mean = []
+avg_ai_calls_std = []
+
+for frac in exploratory_fractions:
+    avg_trust_ai_mean.append(np.mean(results_trust_ai[frac]))
+    avg_trust_ai_std.append(np.std(results_trust_ai[frac]))
+    avg_rewards_mean.append(np.mean(results_rewards[frac]))
+    avg_rewards_std.append(np.std(results_rewards[frac]))
+    avg_ai_calls_mean.append(np.mean(results_ai_calls[frac]))
+    avg_ai_calls_std.append(np.std(results_ai_calls[frac]))
+
+# Plotting the metrics vs exploratory fraction with error bars.
+plt.figure(figsize=(14,4))
+
+plt.subplot(1,3,1)
+plt.errorbar(exploratory_fractions, avg_trust_ai_mean, yerr=avg_trust_ai_std, fmt='o-', capsize=5)
+plt.xlabel('Exploratory Fraction')
+plt.ylabel('Average Trust in AI')
+plt.title('Avg Trust in AI vs Exploratory Fraction')
+
+plt.subplot(1,3,2)
+plt.errorbar(exploratory_fractions, avg_rewards_mean, yerr=avg_rewards_std, fmt='o-', capsize=5)
+plt.xlabel('Exploratory Fraction')
+plt.ylabel('Total Reward')
+plt.title('Total Reward vs Exploratory Fraction')
+
+plt.subplot(1,3,3)
+plt.errorbar(exploratory_fractions, avg_ai_calls_mean, yerr=avg_ai_calls_std, fmt='o-', capsize=5)
+plt.xlabel('Exploratory Fraction')
+plt.ylabel('Total AI Calls')
+plt.title('Total AI Calls vs Exploratory Fraction')
+
+plt.tight_layout()
+plt.show()
