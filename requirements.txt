@@ -2,3 +2,4 @@ mesa
 numpy
 matplotlib
 networkx
+mesa[viz]
