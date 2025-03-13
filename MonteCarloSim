@@ -72,3 +72,4 @@ plt.title('Total AI Calls vs Exploratory Fraction')
 
 plt.tight_layout()
 plt.show()
+plt.savefig("my_plot.png")
