@@ -5,6 +5,7 @@ import networkx as nx
 from mesa import Agent, Model
 from mesa.space import MultiGrid
 from mesa.time import RandomActivation
+from mesa.agent import Agent as MesaAgent
 
 
 #############################
@@ -21,6 +22,7 @@ class DisasterModel(Model):
          
         Fixed number of AI agents is 5.
         """
+        super().__init__()  # Initialize the base Mesa Model (creates self.random, etc.)
         self.share_exploitative = share_exploitative
         self.share_of_disaster = share_of_disaster
         self.base_trust = initial_trust  # this value is used as a baseline.
@@ -200,9 +202,13 @@ class DisasterModel(Model):
 #############################
 # Agent Definitions
 #############################
-class HumanAgent(Agent):
+class HumanAgent(MesaAgent):
     def __init__(self, unique_id, model, agent_type="exploitative"):
-        super().__init__(unique_id, model)
+        MesaAgent.__init__(self, model)
+        # Then explicitly set the unique_id.
+        # Then set the required attributes.
+        self.unique_id = unique_id
+        self.model = model
         self.agent_type = agent_type  # "exploitative" or "exploratory"
         self.trust = {}  # trust values for other agents; keys like "H_3" or "A_1"
         self.Q = {}      # Q–values for information requests (for simplicity, used to adjust trust updates)
@@ -226,68 +232,65 @@ class HumanAgent(Agent):
             self.beliefs[cell] = self.model.disaster_grid[cell]
 
     def request_information(self):
-        """Each tick the human agent requests information from 2 other human agents and 1 AI agent.
-           Exploitative agents choose partners by highest trust while exploratory agents choose more randomly.
-           The response is compared to the actual state at the agent’s current cell and used to update trust."""
-        # Separate candidate IDs.
+        """Each tick the human agent decides to request information from either two humans OR one AI.
+           It chooses the mode based on comparing the highest trust values in each group."""
+        # Determine the highest trust among humans and among AIs.
         human_candidates = [aid for aid in self.trust if aid.startswith("H_")]
         ai_candidates = [aid for aid in self.trust if aid.startswith("A_")]
-
-        # Select 2 human partners.
-        if self.agent_type == "exploitative":
-            sorted_humans = sorted(human_candidates, key=lambda a: self.trust[a], reverse=True)
-            selected_humans = sorted_humans[:2] if len(sorted_humans) >= 2 else sorted_humans
+        best_human_trust = max([self.trust[a] for a in human_candidates], default=0)
+        best_ai_trust = max([self.trust[a] for a in ai_candidates], default=0)
+        
+        # Choose the mode based on which group has higher maximum trust.
+        if best_human_trust >= best_ai_trust:
+            mode = "human"
         else:
-            selected_humans = random.sample(human_candidates, min(2, len(human_candidates)))
-
-        # Select 1 AI partner.
-        if self.agent_type == "exploitative":
-            selected_ai = max(ai_candidates, key=lambda a: self.trust[a]) if ai_candidates else None
-        else:
-            selected_ai = random.choice(ai_candidates) if ai_candidates else None
-
+            mode = "ai"
+        self.info_mode = mode  # store the mode for later use (in send_relief)
+        
         responses = {}
-
-        # Request from human agents.
-        for agent_id in selected_humans:
-            self.calls_human += 1
-            other = self.model.humans.get(agent_id, None)
-            if other is not None:
-                # Ask for information about the cell where this agent is located.
-                resp = other.provide_information(self.pos)
-                # If the other agent is in a cell with high destruction, they may not respond.
-                other_pos = other.pos
-                cell_level = self.model.disaster_grid[other_pos]
-                if cell_level >= 3:
-                    # E.g. at level 3, 20% chance of no response; at 4, 40%; at 5, 60%.
-                    prob_no_response = (cell_level - 2) * 0.2
-                    if random.random() < prob_no_response:
-                        resp = None
-                responses[agent_id] = resp
+        if mode == "human":
+            # --- Request from 2 human partners ---
+            if self.agent_type == "exploitative":
+                sorted_humans = sorted(human_candidates, key=lambda a: self.trust[a], reverse=True)
+                selected = sorted_humans[:2] if len(sorted_humans) >= 2 else sorted_humans
             else:
-                responses[agent_id] = None
-
-        # Request from AI.
-        if selected_ai is not None:
-            self.calls_ai += 1
-            other = self.model.ais.get(selected_ai, None)
-            if other is not None:
-                # For the AI request, pass the human’s current belief for correction.
-                resp = other.provide_information(self.pos, self.beliefs[self.pos])
-                responses[selected_ai] = resp
+                selected = random.sample(human_candidates, min(2, len(human_candidates)))
+            for agent_id in selected:
+                self.calls_human += 1
+                other = self.model.humans.get(agent_id, None)
+                if other is not None:
+                    resp = other.provide_information(self.pos)
+                    other_pos = other.pos
+                    cell_level = self.model.disaster_grid[other_pos]
+                    if cell_level >= 3:
+                        # At higher destruction levels, increase chance of no response.
+                        prob_no_response = (cell_level - 2) * 0.2
+                        if random.random() < prob_no_response:
+                            resp = None
+                    responses[agent_id] = resp
+                else:
+                    responses[agent_id] = None
+        else:
+            # --- Request from 1 AI partner ---
+            if self.agent_type == "exploitative":
+                selected_ai = max(ai_candidates, key=lambda a: self.trust[a]) if ai_candidates else None
             else:
-                responses[selected_ai] = None
+                selected_ai = random.choice(ai_candidates) if ai_candidates else None
+            if selected_ai is not None:
+                self.calls_ai += 1
+                other = self.model.ais.get(selected_ai, None)
+                if other is not None:
+                    resp = other.provide_information(self.pos, self.beliefs[self.pos])
+                    responses[selected_ai] = resp
+                else:
+                    responses[selected_ai] = None
 
         # --- Update trust based on responses ---
-        # Here we compare the information received to the actual disaster level at the agent’s current position.
         for agent_id, info in responses.items():
             if info is None:
-                # No response reduces trust.
                 self.trust[agent_id] = max(0, self.trust[agent_id] - 0.1)
             else:
                 actual = self.model.disaster_grid[self.pos]
-                # If the response exactly matches the actual value, add 0.1;
-                # if it is off by 1, add 0.05; otherwise, decrease trust.
                 if abs(info - actual) == 0:
                     delta = 0.1
                 elif abs(info - actual) == 1:
@@ -295,20 +298,24 @@ class HumanAgent(Agent):
                 else:
                     delta = -0.1
                 self.trust[agent_id] = max(0, min(1, self.trust[agent_id] + delta))
-                # Update Q–value for that partner (a rudimentary learning update).
+                # Simple Q–value update.
                 old_q = self.Q.get(agent_id, self.trust[agent_id])
                 self.Q[agent_id] = old_q + self.learning_rate * (delta - old_q)
-                # Record a pending relief action (assume the info provider is linked to the suggestion).
                 self.pending_relief.append((self.model.tick, self.pos, agent_id))
-
+    
     def send_relief(self):
-        """Decide where to send relief tokens.
-           For simplicity, choose up to 3 cells in the agent’s neighborhood with the highest believed damage (levels >= 3)."""
+        """Decide where to send relief tokens based on the current mode.
+           If the agent used human information, it considers only nearby cells.
+           If using AI information, it considers a larger neighborhood."""
         pos = self.pos
-        cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
+        # If using AI info, use a larger radius to capture distant but affected areas.
+        if getattr(self, 'info_mode', 'human') == 'ai':
+            cells = self.model.grid.get_neighborhood(pos, moore=True, radius=5, include_center=True)
+        else:
+            cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
+        # Choose up to 3 cells with highest believed damage.
         sorted_cells = sorted(cells, key=lambda c: self.beliefs[c], reverse=True)
         selected = [c for c in sorted_cells if self.beliefs[c] >= 3][:3]
-        # Record a relief action (with no associated info provider).
         for cell in selected:
             self.pending_relief.append((self.model.tick, cell, None))
 
@@ -326,23 +333,23 @@ class HumanAgent(Agent):
                     reward = 5
                 self.total_reward += reward
                 # For exploitative agents, update trust based on the reward.
-                if info_provider is not None and self.agent_type == "exploitative":
+                if info_provider is not None and self.agent_type == "exploratory":
                     if reward >= 5:
-                        self.trust[info_provider] = min(1, self.trust[info_provider] + 0.1)
-                    elif reward >= 2:
                         self.trust[info_provider] = min(1, self.trust[info_provider] + 0.05)
+                    elif reward >= 2:
+                        self.trust[info_provider] = min(1, self.trust[info_provider] + 0)
                     else:
-                        self.trust[info_provider] = max(0, self.trust[info_provider] - 0.1)
+                        self.trust[info_provider] = max(0, self.trust[info_provider] - 0.2)
             else:
                 new_pending.append((t, cell, info_provider))
         self.pending_relief = new_pending
 
     def provide_information(self, pos_request):
         """When another human requests information, provide the destruction level of the requested cell.
-           With 10% chance, return a noisy (deviated) value."""
+           With 20% chance, return a noisy (deviated) value with up to 2 difference."""
         true_value = self.model.disaster_grid[pos_request]
-        if random.random() < 0.1:
-            deviation = random.choice([-1, 1])
+        if random.random() < 0.2:
+            deviation = random.choice([-2, 0])
             return max(0, min(5, true_value + deviation))
         else:
             return true_value
@@ -356,9 +363,11 @@ class HumanAgent(Agent):
         self.send_relief()
 
 
-class AIAgent(Agent):
+class AIAgent(MesaAgent):
     def __init__(self, unique_id, model):
-        super().__init__(unique_id, model)
+        MesaAgent.__init__(self, model)
+        self.unique_id = unique_id
+        self.model = model
         self.memory = {}  # Can be used to remember past interactions.
         self.sensed = {}  # Store sensed values for 20% of grid cells.
 
@@ -398,11 +407,11 @@ if __name__ == "__main__":
     # Define simulation parameters.
     share_exploitative = 0.5
     share_of_disaster = 0.2
-    initial_trust = 0.7
+    initial_trust = 0.5
     number_of_humans = 50
 
     model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, number_of_humans)
-    ticks = 30
+    ticks = 100
 
     for i in range(ticks):
         model.step()
