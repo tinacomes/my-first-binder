@@ -1,0 +1,553 @@
+import random
+import math
+import matplotlib.pyplot as plt
+import networkx as nx
+
+from mesa import Agent, Model
+from mesa.space import MultiGrid
+from mesa.time import RandomActivation
+
+#########################################
+# Disaster Model Definition
+#########################################
+class DisasterModel(Model):
+    def __init__(self,
+                 share_exploitative,      # fraction of humans that are exploitative
+                 share_of_disaster,       # fraction of grid cells initially affected
+                 initial_trust,           # baseline trust for human agents
+                 initial_ai_trust,        # baseline trust for AI agents (adjustable)
+                 number_of_humans,
+                 disaster_dynamics=2,     # parameter to control max change in disaster per tick
+                 shock_probability=0.1,   # probability a shock occurs in a cell
+                 shock_magnitude=2,       # maximum magnitude of a shock change
+                 trust_update_mode="average",  # "average" or "max" for trust update
+                 width=50, height=50):
+
+        super().__init__()  # initialize Mesa.Model (sets self.random, etc.)
+        self.share_exploitative = share_exploitative
+        self.share_of_disaster = share_of_disaster
+        self.base_trust = initial_trust
+        self.base_ai_trust = initial_ai_trust
+        self.num_humans = number_of_humans
+        self.num_ai = 5
+        self.width = width
+        self.height = height
+        self.disaster_dynamics = disaster_dynamics
+        self.shock_probability = shock_probability
+        self.shock_magnitude = shock_magnitude
+        self.trust_update_mode = trust_update_mode  # controls whether to use average or max deviation
+
+        self.grid = MultiGrid(width, height, torus=False)
+        self.schedule = RandomActivation(self)
+        self.tick = 0
+
+        # --- Create disaster grid ---
+        self.disaster_grid = {}
+        self.epicenter = (random.randint(0, width - 1), random.randint(0, height - 1))
+        # Compute radius so that about share_of_disaster fraction of cells are affected.
+        total_cells = width * height
+        self.disaster_radius = math.sqrt(self.share_of_disaster * total_cells / math.pi)
+        for x in range(width):
+            for y in range(height):
+                d = math.sqrt((x - self.epicenter[0])**2 + (y - self.epicenter[1])**2)
+                if d < self.disaster_radius / 3:
+                    level = 5
+                elif d < 2 * self.disaster_radius / 3:
+                    level = 4
+                elif d < self.disaster_radius:
+                    level = 3
+                else:
+                    level = 0
+                self.disaster_grid[(x, y)] = level
+
+        # --- Create social network among humans (using Watts–Strogatz small-world network) ---
+        self.social_network = nx.watts_strogatz_graph(self.num_humans, 4, 0.1)
+
+        # --- Create Human Agents ---
+        self.humans = {}
+        for i in range(self.num_humans):
+            agent_type = "exploitative" if random.random() < self.share_exploitative else "exploratory"
+            a = HumanAgent(unique_id=f"H_{i}", model=self, agent_type=agent_type)
+            self.humans[f"H_{i}"] = a
+            self.schedule.add(a)
+            x = random.randrange(width)
+            y = random.randrange(height)
+            self.grid.place_agent(a, (x, y))
+
+        # --- Initialize trust for human agents ---
+        for i in range(self.num_humans):
+            agent_id = f"H_{i}"
+            agent = self.humans[agent_id]
+            for j in range(self.num_humans):
+                if agent_id == f"H_{j}":
+                    continue
+                # If connected in the social network, bonus trust.
+                if self.social_network.has_edge(i, j):
+                    agent.trust[f"H_{j}"] = self.base_trust + 0.1
+                else:
+                    agent.trust[f"H_{j}"] = self.base_trust
+                # Also initialize info_accuracy for human partners (baseline 0.5)
+                agent.info_accuracy[f"H_{j}"] = 0.5
+            # For AI agents, use adjustable baseline.
+            for k in range(self.num_ai):
+                agent.trust[f"A_{k}"] = self.base_ai_trust
+                agent.info_accuracy[f"A_{k}"] = 0.5
+
+        # --- Create AI Agents ---
+        self.ais = {}
+        for k in range(self.num_ai):
+            a = AIAgent(unique_id=f"A_{k}", model=self)
+            self.ais[f"A_{k}"] = a
+            self.schedule.add(a)
+            x = random.randrange(width)
+            y = random.randrange(height)
+            self.grid.place_agent(a, (x, y))
+
+        # --- Statistics containers ---
+        # For each tick, record:
+        #   trust_data: tuple (avg trust in humans and AI for exploitative and exploratory agents)
+        #   calls_data: (# calls to humans, # calls to AI) for each type
+        #   rewards_data: total rewards per tick per type (tuple: (exploit_reward, explor_reward))
+        self.trust_data = []    # (exp_human, exp_ai, expl_human, expl_ai)
+        self.calls_data = []    # (calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai)
+        self.rewards_data = []  # (total_reward_exploitative, total_reward_exploratory)
+
+    def update_disaster(self):
+        """Dynamically update the disaster grid.
+           Each cell’s level is adjusted toward its baseline and random shocks are added.
+           The magnitude of changes is modulated by self.disaster_dynamics and shock parameters."""
+        new_grid = {}
+        for pos, level in self.disaster_grid.items():
+            x, y = pos
+            d = math.sqrt((x - self.epicenter[0])**2 + (y - self.epicenter[1])**2)
+            if d < self.disaster_radius / 3:
+                baseline = 5
+            elif d < 2 * self.disaster_radius / 3:
+                baseline = 4
+            elif d < self.disaster_radius:
+                baseline = 3
+            else:
+                baseline = 0
+
+            diff = baseline - level
+            # Adjust toward baseline by a random amount between 1 and disaster_dynamics
+            if diff > 0:
+                change = random.randint(1, int(self.disaster_dynamics))
+            elif diff < 0:
+                change = -random.randint(1, int(self.disaster_dynamics))
+            else:
+                change = 0
+
+            new_level = level + change
+
+            # Random shock: with probability shock_probability, add a shock (could be positive or negative)
+            if random.random() < self.shock_probability:
+                shock = random.randint(1, self.shock_magnitude)
+                if random.random() < 0.5:
+                    shock = -shock
+                new_level += shock
+
+            # Clip to [0, 5]
+            new_level = max(0, min(5, new_level))
+            new_grid[pos] = new_level
+
+        # Additionally, change the epicenter randomly with a very low probability (to simulate new disasters)
+        if random.random() < 0.02:
+            self.epicenter = (random.randint(0, self.width - 1), random.randint(0, self.height - 1))
+        self.disaster_grid = new_grid
+
+    def step(self):
+        # Update disaster environment dynamics.
+        self.update_disaster()
+        # Let each agent act.
+        self.schedule.step()
+
+        # Process delayed relief actions for each human agent.
+        total_reward_exploit = 0
+        total_reward_explor = 0
+        for agent in self.humans.values():
+            agent.process_relief_actions(self.tick, self.disaster_grid)
+            if agent.agent_type == "exploitative":
+                total_reward_exploit += agent.total_reward
+            else:
+                total_reward_explor += agent.total_reward
+
+        # Collect trust and call statistics for each group.
+        exp_human_trust = []
+        exp_ai_trust = []
+        expl_human_trust = []
+        expl_ai_trust = []
+        calls_exp_human = 0
+        calls_exp_ai = 0
+        calls_expl_human = 0
+        calls_expl_ai = 0
+
+        for agent in self.humans.values():
+            # Separate trust values (for info sources) by partner type.
+            human_trust_vals = [v for key, v in agent.trust.items() if key.startswith("H_")]
+            ai_trust_vals = [v for key, v in agent.trust.items() if key.startswith("A_")]
+            if agent.agent_type == "exploitative":
+                if human_trust_vals:
+                    exp_human_trust.append(sum(human_trust_vals) / len(human_trust_vals))
+                if ai_trust_vals:
+                    exp_ai_trust.append(sum(ai_trust_vals) / len(ai_trust_vals))
+                calls_exp_human += agent.calls_human
+                calls_exp_ai += agent.calls_ai
+            else:
+                if human_trust_vals:
+                    expl_human_trust.append(sum(human_trust_vals) / len(human_trust_vals))
+                if ai_trust_vals:
+                    expl_ai_trust.append(sum(ai_trust_vals) / len(ai_trust_vals))
+                calls_expl_human += agent.calls_human
+                calls_expl_ai += agent.calls_ai
+
+            # Reset per-tick counters.
+            agent.calls_human = 0
+            agent.calls_ai = 0
+            agent.total_reward = 0
+
+        # Average trust values for each group (or 0 if none)
+        avg_exp_human_trust = sum(exp_human_trust) / len(exp_human_trust) if exp_human_trust else 0
+        avg_exp_ai_trust = sum(exp_ai_trust) / len(exp_ai_trust) if exp_ai_trust else 0
+        avg_expl_human_trust = sum(expl_human_trust) / len(expl_human_trust) if expl_human_trust else 0
+        avg_expl_ai_trust = sum(expl_ai_trust) / len(expl_ai_trust) if expl_ai_trust else 0
+
+        self.trust_data.append((avg_exp_human_trust, avg_exp_ai_trust, avg_expl_human_trust, avg_expl_ai_trust))
+        self.calls_data.append((calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai))
+        self.rewards_data.append((total_reward_exploit, total_reward_explor))
+
+        self.tick += 1
+
+#########################################
+# Agent Definitions
+#########################################
+# Human Agent
+class HumanAgent(Agent):
+    def __init__(self, unique_id, model, agent_type="exploitative"):
+        # Explicitly call the parent constructor.
+        super().__init__(model)
+        self.unique_id = unique_id
+        self.model = model
+        self.agent_type = agent_type  # "exploitative" or "exploratory"
+
+        # Trust in info sources (keys: "H_x" or "A_x")
+        self.trust = {}
+        # Info accuracy estimates (for expected utility); baseline 0.5
+        self.info_accuracy = {}
+        # Q-values could be used for learning (not fully implemented here)
+        self.Q = {}
+
+        # Beliefs about grid cells (initialize to 0 everywhere)
+        self.beliefs = {(x, y): 0 for x in range(self.model.width) for y in range(self.model.height)}
+        # Pending relief actions: list of tuples (tick_requested, cell, info_provider)
+        self.pending_relief = []
+        # Counters for number of information requests made this tick.
+        self.calls_human = 0
+        self.calls_ai = 0
+        # Total reward accumulated in the tick.
+        self.total_reward = 0
+
+        # Learning rate for updating info_accuracy.
+        self.learning_rate = 0.1
+        # Store the current mode of information request ("human" or "ai")
+        self.info_mode = "human"
+
+    def sense_environment(self):
+        """Sense the destruction level in the immediate neighborhood (Moore neighborhood)."""
+        pos = self.pos
+        cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
+        for cell in cells:
+            # Assume accurate sensing (could add noise if desired)
+            self.beliefs[cell] = self.model.disaster_grid[cell]
+
+    def request_information(self):
+        """
+        Decide whether to request information from human sources or AI based on an expected utility
+        calculation that combines trust, past info accuracy, and coverage (AI can cover more cells).
+        """
+        # Candidate info sources.
+        human_candidates = [aid for aid in self.trust if aid.startswith("H_")]
+        ai_candidates = [aid for aid in self.trust if aid.startswith("A_")]
+
+        # Compute summary measures.
+        if human_candidates:
+            max_human_trust = max([self.trust[a] for a in human_candidates])
+            avg_human_accuracy = sum([self.info_accuracy.get(a, 0.5) for a in human_candidates]) / len(human_candidates)
+        else:
+            max_human_trust = 0
+            avg_human_accuracy = 0.5
+        if ai_candidates:
+            max_ai_trust = max([self.trust[a] for a in ai_candidates])
+            avg_ai_accuracy = sum([self.info_accuracy.get(a, 0.5) for a in ai_candidates]) / len(ai_candidates)
+        else:
+            max_ai_trust = 0
+            avg_ai_accuracy = 0.5
+
+        # Coverage bonus: humans only see local cells; AI sees a broader area.
+        human_coverage = 0.5
+        ai_coverage = 1.0
+
+        # Weighting: exploitative agents lean toward trust; exploratory toward accuracy.
+        if self.agent_type == "exploitative":
+            alpha = 0.7
+            beta = 0.3
+        else:
+            alpha = 0.4
+            beta = 0.6
+        gamma = 0.2  # constant for coverage
+
+        human_utility = alpha * max_human_trust + beta * avg_human_accuracy + gamma * human_coverage
+        ai_utility = alpha * max_ai_trust + beta * avg_ai_accuracy + gamma * ai_coverage
+
+        # Choose mode based on higher expected utility.
+        if ai_utility > human_utility:
+            self.info_mode = "ai"
+        else:
+            self.info_mode = "human"
+
+        responses = {}
+
+        if self.info_mode == "human":
+            # Request from 2 human partners.
+            if self.agent_type == "exploitative":
+                sorted_humans = sorted(human_candidates, key=lambda a: self.trust[a], reverse=True)
+                selected = sorted_humans[:2] if len(sorted_humans) >= 2 else sorted_humans
+            else:
+                selected = random.sample(human_candidates, min(2, len(human_candidates)))
+            for agent_id in selected:
+                self.calls_human += 1
+                other = self.model.humans.get(agent_id, None)
+                if other is not None:
+                    info = other.provide_information_full()
+                    # If the provider is in a heavily damaged cell, they may not respond.
+                    other_pos = other.pos
+                    cell_level = self.model.disaster_grid[other_pos]
+                    if cell_level >= 3:
+                        prob_no_response = (cell_level - 2) * 0.2
+                        if random.random() < prob_no_response:
+                            info = None
+                    responses[agent_id] = info
+                else:
+                    responses[agent_id] = None
+        else:
+            # Request from 1 AI partner.
+            if self.agent_type == "exploitative":
+                selected_ai = max(ai_candidates, key=lambda a: self.trust[a]) if ai_candidates else None
+            else:
+                selected_ai = random.choice(ai_candidates) if ai_candidates else None
+            if selected_ai is not None:
+                self.calls_ai += 1
+                other = self.model.ais.get(selected_ai, None)
+                if other is not None:
+                    # Pass current beliefs and the trust level in that AI so the AI can adjust its correction.
+                    info = other.provide_information_full(self.beliefs, trust=self.trust[selected_ai])
+                    responses[selected_ai] = info
+                else:
+                    responses[selected_ai] = None
+
+        # --- Update trust based on responses ---
+        for source_id, info in responses.items():
+            if info is None:
+                # No response reduces trust.
+                self.trust[source_id] = max(0, self.trust[source_id] - 0.1)
+            else:
+                # info is a dictionary mapping cell positions to reported destruction level.
+                deviations = [abs(info.get(cell, self.beliefs[cell]) - self.beliefs[cell]) for cell in info.keys()]
+                if self.model.trust_update_mode == "average":
+                    deviation_measure = sum(deviations) / len(deviations) if deviations else 0
+                else:  # max mode
+                    deviation_measure = max(deviations) if deviations else 0
+
+                # Update trust based on deviation.
+                if deviation_measure < 0.5:
+                    delta = 0.1
+                elif deviation_measure < 1.0:
+                    delta = 0.05
+                else:
+                    delta = -0.1
+                self.trust[source_id] = max(0, min(1, self.trust[source_id] + delta))
+                # Update info accuracy as a running average.
+                old_acc = self.info_accuracy.get(source_id, 0.5)
+                self.info_accuracy[source_id] = old_acc + self.learning_rate * (max(0, 1 - deviation_measure) - old_acc)
+                # Record a pending relief action associated with this source.
+                self.pending_relief.append((self.model.tick, self.pos, source_id))
+
+    def send_relief(self):
+        """Decide where to send relief tokens.
+           If using AI information, consider a larger neighborhood; otherwise, use the immediate vicinity."""
+        pos = self.pos
+        if getattr(self, 'info_mode', 'human') == "ai":
+            cells = self.model.grid.get_neighborhood(pos, moore=True, radius=5, include_center=True)
+        else:
+            cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
+        sorted_cells = sorted(cells, key=lambda c: self.beliefs[c], reverse=True)
+        selected = [c for c in sorted_cells if self.beliefs[c] >= 3][:3]
+        for cell in selected:
+            self.pending_relief.append((self.model.tick, cell, None))
+
+    def process_relief_actions(self, current_tick, disaster_grid):
+        """Process relief actions that are 2 ticks old.
+           Rewards are given based on actual destruction level (2 for level 4, 5 for level 5).
+           Also update trust/info_accuracy for the associated info provider based on reward."""
+        new_pending = []
+        for t, cell, info_provider in self.pending_relief:
+            if current_tick - t >= 2:
+                level = disaster_grid[cell]
+                reward = 0
+                if level == 4:
+                    reward = 2
+                elif level == 5:
+                    reward = 5
+                self.total_reward += reward
+                if info_provider is not None:
+                    if reward >= 5:
+                        self.trust[info_provider] = min(1, self.trust[info_provider] + 0.1)
+                    elif reward >= 2:
+                        self.trust[info_provider] = min(1, self.trust[info_provider] + 0.05)
+                    else:
+                        self.trust[info_provider] = max(0, self.trust[info_provider] - 0.1)
+                    old_acc = self.info_accuracy.get(info_provider, 0.5)
+                    self.info_accuracy[info_provider] = old_acc + self.learning_rate * ((reward / 5.0) - old_acc)
+            else:
+                new_pending.append((t, cell, info_provider))
+        self.pending_relief = new_pending
+
+    def provide_information_full(self):
+        """
+        For human agents: return information about all grid cells in the local neighborhood,
+        with a 10% chance of noise (deviation by ±1).
+        """
+        pos = self.pos
+        cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
+        info = {}
+        for cell in cells:
+            level = self.model.disaster_grid[cell]
+            if random.random() < 0.1:
+                level = max(0, min(5, level + random.choice([-1, 1])))
+            info[cell] = level
+        return info
+
+    def step(self):
+        # Update own beliefs from local sensing.
+        self.sense_environment()
+        # Request information using the expected utility mechanism.
+        self.request_information()
+        # Decide where to send relief tokens.
+        self.send_relief()
+
+# AI Agent
+class AIAgent(Agent):
+    def __init__(self, unique_id, model):
+        super().__init__(model)
+        self.unique_id = unique_id
+        self.model = model
+        self.memory = {}  # For recording past interactions (if needed)
+        self.sensed = {}  # Dictionary for cells sensed this tick
+
+    def sense_environment(self):
+        """Sense a random fraction (e.g., 10%) of the grid cells and record their destruction levels."""
+        num_cells = int(0.1 * self.model.width * self.model.height)
+        self.sensed = {}
+        cells = random.sample(list(self.model.disaster_grid.keys()), num_cells)
+        for cell in cells:
+            self.sensed[cell] = self.model.disaster_grid[cell]
+
+    def provide_information_full(self, human_beliefs, trust):
+        """
+        For AI: provide information about all grid cells sensed.
+        Adjust information toward the human's beliefs if the discrepancy is large.
+        The correction strength increases if the human's trust in this AI is low.
+        """
+        info = {}
+        for cell, sensed_val in self.sensed.items():
+            human_val = human_beliefs.get(cell, sensed_val)
+            if abs(sensed_val - human_val) > 1:
+                # Correction factor: stronger if trust is low.
+                correction_factor = 1 - min(1, trust)
+                corrected = round(sensed_val + correction_factor * (human_val - sensed_val))
+            else:
+                corrected = sensed_val
+            info[cell] = corrected
+        return info
+
+    def step(self):
+        # Update sensed cells each tick.
+        self.sense_environment()
+
+#########################################
+# Run Model and Plot Results
+#########################################
+if __name__ == "__main__":
+    # Set simulation parameters.
+    share_exploitative = 0.5
+    share_of_disaster = 0.2
+    initial_trust = 0.7
+    initial_ai_trust = 0.7  # Adjust this to vary initial AI trust discounting
+    number_of_humans = 50
+
+    # Disaster dynamics parameters.
+    disaster_dynamics = 2      # max change per tick toward baseline
+    shock_probability = 0.1
+    shock_magnitude = 2
+    trust_update_mode = "average"  # or "max"
+
+    model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
+                          number_of_humans, disaster_dynamics, shock_probability, shock_magnitude,
+                          trust_update_mode)
+
+    ticks = 30
+    for i in range(ticks):
+        model.step()
+
+    # --- Plotting Results ---
+
+    ticks_range = list(range(ticks))
+    # Unpack trust_data: each entry is (exp_human, exp_ai, expl_human, expl_ai)
+    exp_human_trust = [d[0] for d in model.trust_data]
+    exp_ai_trust = [d[1] for d in model.trust_data]
+    expl_human_trust = [d[2] for d in model.trust_data]
+    expl_ai_trust = [d[3] for d in model.trust_data]
+
+    # Unpack calls_data: (calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai)
+    calls_exp_human = [d[0] for d in model.calls_data]
+    calls_exp_ai = [d[1] for d in model.calls_data]
+    calls_expl_human = [d[2] for d in model.calls_data]
+    calls_expl_ai = [d[3] for d in model.calls_data]
+
+    # Unpack rewards_data: (total_reward_exploit, total_reward_explor)
+    rewards_exploit = [d[0] for d in model.rewards_data]
+    rewards_explor = [d[1] for d in model.rewards_data]
+
+    # Plot 1: Total rewards per tick by agent type.
+    plt.figure()
+    plt.plot(ticks_range, rewards_exploit, label="Exploitative Total Reward")
+    plt.plot(ticks_range, rewards_explor, label="Exploratory Total Reward")
+    plt.xlabel("Tick")
+    plt.ylabel("Total Rewards")
+    plt.title("Total Rewards per Tick by Agent Type")
+    plt.legend()
+    plt.show()
+
+    # Plot 2: Trust evolution (showing trust in human vs AI info sources for both agent types).
+    plt.figure()
+    plt.plot(ticks_range, exp_human_trust, label="Exploitative: Human Trust")
+    plt.plot(ticks_range, exp_ai_trust, label="Exploitative: AI Trust")
+    plt.plot(ticks_range, expl_human_trust, label="Exploratory: Human Trust")
+    plt.plot(ticks_range, expl_ai_trust, label="Exploratory: AI Trust")
+    plt.xlabel("Tick")
+    plt.ylabel("Average Trust")
+    plt.title("Trust Evolution (Human & AI) by Agent Type")
+    plt.legend()
+    plt.show()
+
+    # Plot 3: Calls for information per tick.
+    plt.figure()
+    plt.plot(ticks_range, calls_exp_human, label="Exploitative: Calls to Humans")
+    plt.plot(ticks_range, calls_exp_ai, label="Exploitative: Calls to AI")
+    plt.plot(ticks_range, calls_expl_human, label="Exploratory: Calls to Humans")
+    plt.plot(ticks_range, calls_expl_ai, label="Exploratory: Calls to AI")
+    plt.xlabel("Tick")
+    plt.ylabel("Number of Information Requests")
+    plt.title("Information Request Calls by Agent Type")
+    plt.legend()
+    plt.show()
