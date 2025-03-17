@@ -8,7 +8,7 @@ from mesa.space import MultiGrid
 from mesa.time import RandomActivation
 
 #########################################
-# Disaster Model Definition (Extended Version A)
+# Disaster Model Definition (Updated Trust and Accuracy Version)
 #########################################
 class DisasterModel(Model):
     def __init__(self,
@@ -17,12 +17,12 @@ class DisasterModel(Model):
                  initial_trust,               # Baseline trust for human agents.
                  initial_ai_trust,            # Baseline trust for AI agents.
                  number_of_humans,
-                 share_confirming,            # Fraction of humans that are "confirming" (affects info acceptance parameters).
+                 share_confirming,            # Fraction of humans that are "confirming"
                  disaster_dynamics=2,         # Maximum change in disaster per tick.
-                 shock_probability=0.1,       # Probability a shock occurs.
+                 shock_probability=0.1,       # Probability that a shock occurs.
                  shock_magnitude=2,           # Maximum shock magnitude.
-                 trust_update_mode="average", # (Not used further, but preserved)
-                 exploitative_correction_factor=1.0,  # (Not used further here)
+                 trust_update_mode="average", # (Not used further here)
+                 exploitative_correction_factor=1.0,  # (Not used further)
                  width=50, height=50):
         super().__init__()
         self.share_exploitative = share_exploitative
@@ -45,12 +45,13 @@ class DisasterModel(Model):
         self.tick = 0
 
         # For tracking assistance:
-        self.assistance = {}  # Cumulative tokens delivered per cell.
-        self.unmet_needs_evolution = []  # Number of cells in need (level>=4) that got no token each tick.
+        self.assistance_exploit = {}  # cell -> tokens delivered by exploitative agents
+        self.assistance_explor = {}   # cell -> tokens delivered by exploratory agents
+        self.unmet_needs_evolution = []  # Number of cells in need (level >= 4) that got no token this tick.
 
         # Create disaster grid.
         self.disaster_grid = {}
-        self.epicenter = (random.randint(0, width-1), random.randint(0, height-1))
+        self.epicenter = (random.randint(0, width - 1), random.randint(0, height - 1))
         total_cells = width * height
         self.disaster_radius = math.sqrt(self.share_of_disaster * total_cells / math.pi)
         for x in range(width):
@@ -66,7 +67,7 @@ class DisasterModel(Model):
                     level = 0
                 self.disaster_grid[(x, y)] = level
 
-        # Create a Watts–Strogatz network (for possible later use).
+        # Create a Watts–Strogatz network (for friend selection if desired).
         self.social_network = nx.watts_strogatz_graph(self.num_humans, 4, 0.1)
 
         # Create human agents.
@@ -80,7 +81,7 @@ class DisasterModel(Model):
             y = random.randrange(height)
             self.grid.place_agent(a, (x, y))
 
-        # Initialize trust and info_accuracy for humans.
+        # Initialize trust and info_accuracy.
         for i in range(self.num_humans):
             agent_id = f"H_{i}"
             agent = self.humans[agent_id]
@@ -89,7 +90,7 @@ class DisasterModel(Model):
                     continue
                 agent.trust[f"H_{j}"] = random.uniform(self.base_trust - 0.05, self.base_trust + 0.05)
                 agent.info_accuracy[f"H_{j}"] = random.uniform(0.4, 0.6)
-            # Boost trust for a friend group (5% of humans, at least one).
+            # Set friend list: randomly select 5% of humans (at least one) and boost trust.
             friend_count = max(1, int(0.05 * self.num_humans))
             possible_friends = [f"H_{j}" for j in range(self.num_humans) if f"H_{j}" != agent_id]
             agent.friends = set(random.sample(possible_friends, friend_count))
@@ -146,17 +147,15 @@ class DisasterModel(Model):
         self.disaster_grid = new_grid
 
     def step(self):
-        # Reset tokens delivered this tick.
-        self.tokens_this_tick = {}
+        self.tokens_this_tick = {}  # To record tokens delivered this tick.
         self.update_disaster()
         self.schedule.step()
-        # After all agents have processed relief actions, compute unmet needs.
+        # Compute unmet needs: count cells with level>=4 that got no token.
         unmet = 0
         for pos, level in self.disaster_grid.items():
             if level >= 4 and self.tokens_this_tick.get(pos, 0) == 0:
                 unmet += 1
         self.unmet_needs_evolution.append(unmet)
-        # Collect statistics from agents.
         total_reward_exploit = 0
         total_reward_explor = 0
         for agent in self.humans.values():
@@ -175,26 +174,26 @@ class DisasterModel(Model):
             ai_vals = [v for key, v in agent.trust.items() if key.startswith("A_")]
             if agent.agent_type == "exploitative":
                 if human_vals:
-                    exp_human_trust.append(sum(human_vals)/len(human_vals))
+                    exp_human_trust.append(sum(human_vals) / len(human_vals))
                 if ai_vals:
-                    exp_ai_trust.append(sum(ai_vals)/len(ai_vals))
+                    exp_ai_trust.append(sum(ai_vals) / len(ai_vals))
                 calls_exp_human += agent.calls_human
                 calls_exp_ai += agent.calls_ai
             else:
                 if human_vals:
-                    expl_human_trust.append(sum(human_vals)/len(human_vals))
+                    expl_human_trust.append(sum(human_vals) / len(human_vals))
                 if ai_vals:
-                    expl_ai_trust.append(sum(ai_vals)/len(ai_vals))
+                    expl_ai_trust.append(sum(ai_vals) / len(ai_vals))
                 calls_expl_human += agent.calls_human
                 calls_expl_ai += agent.calls_ai
             agent.calls_human = 0
             agent.calls_ai = 0
             agent.total_reward = 0
 
-        avg_exp_human_trust = sum(exp_human_trust)/len(exp_human_trust) if exp_human_trust else 0
-        avg_exp_ai_trust = sum(exp_ai_trust)/len(exp_ai_trust) if exp_ai_trust else 0
-        avg_expl_human_trust = sum(expl_human_trust)/len(expl_human_trust) if expl_human_trust else 0
-        avg_expl_ai_trust = sum(expl_ai_trust)/len(expl_ai_trust) if expl_ai_trust else 0
+        avg_exp_human_trust = sum(exp_human_trust) / len(exp_human_trust) if exp_human_trust else 0
+        avg_exp_ai_trust = sum(exp_ai_trust) / len(exp_ai_trust) if exp_ai_trust else 0
+        avg_expl_human_trust = sum(expl_human_trust) / len(expl_human_trust) if expl_human_trust else 0
+        avg_expl_ai_trust = sum(expl_ai_trust) / len(expl_ai_trust) if expl_ai_trust else 0
 
         self.trust_data.append((avg_exp_human_trust, avg_exp_ai_trust, avg_expl_human_trust, avg_expl_ai_trust))
         self.calls_data.append((calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai))
@@ -211,7 +210,7 @@ class HumanAgent(Agent):
         self.id_num = id_num
         self.model = model
         self.agent_type = agent_type
-        # Assign attitude type.
+        # Attitude: "confirming" get D=0.3, delta=20, epsilon=5; others get D=0.5, delta=5, epsilon=3.
         if random.random() < share_confirming:
             self.attitude_type = "confirming"
             self.D = 0.3
@@ -226,20 +225,17 @@ class HumanAgent(Agent):
         self.trust = {}
         self.info_accuracy = {}
         self.Q = {}
-        # Initialize beliefs to 0.
         self.beliefs = {(x, y): 0 for x in range(self.model.width) for y in range(self.model.height)}
-        # pending_relief now stores tuples: (tick, source_id, accepted_count)
+        # pending_relief entries: (tick, source_id, accepted_count)
         self.pending_relief = []
         self.calls_human = 0
         self.calls_ai = 0
         self.total_reward = 0
         self.learning_rate = 0.1
         self.info_mode = "human"
-        # Friend list: randomly select 5% of humans (at least one) – these get bonus trust.
-        friend_count = max(1, int(0.05 * self.model.num_humans))
-        possible_friends = [f"H_{j}" for j in range(self.model.num_humans) if f"H_{j}" != self.unique_id]
-        self.friends = set(random.sample(possible_friends, friend_count))
-    
+        # Friend list is set in the model initialization.
+        self.friends = set()
+
     def sense_environment(self):
         pos = self.pos
         cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
@@ -251,165 +247,129 @@ class HumanAgent(Agent):
                 self.beliefs[cell] = actual
 
     def request_information(self):
-        # Determine candidate sources: use friend list if available.
-        friend_candidates = [aid for aid in self.trust if aid in self.friends]
-        if len(friend_candidates) < 5:
-            candidate_set = [aid for aid in self.trust if aid.startswith("H_")]
-        else:
-            candidate_set = friend_candidates
-        # Call up to n=5 sources.
-        n = min(5, len(candidate_set))
-        if n > 0:
+        # Compute individual scores for each candidate source.
+        candidate_scores = []
+        for candidate in [aid for aid in self.trust if aid.startswith("H_")]:
+            bonus = 0.1 if candidate in self.friends else 0.0
+            # Use individual candidate trust (with bonus) and candidate's info_accuracy.
+            # We use the following weights:
+            # For exploitative: α = 0.9, β = 0.0, γ = 0.1;
+            # For exploratory: α = 0.3, β = 0.5, γ = 0.2.
             if self.agent_type == "exploitative":
-                # Sort candidates by trust and pick top n.
-                selected = sorted(candidate_set, key=lambda a: self.trust[a], reverse=True)[:n]
+                score = 0.7 * (self.trust[candidate] + bonus) + 0.3 * self.info_accuracy.get(candidate, 0.5) + 0.0 * 0.5
             else:
-                selected = random.sample(candidate_set, n)
-        else:
-            selected = []
-        # Also, for AI sources, candidate set is those with key starting with "A_".
-        ai_candidates = [aid for aid in self.trust if aid.startswith("A_")]
-        # Use the parameter weights:
-        if self.agent_type == "exploitative":
-            human_coverage = 0.5
-            ai_coverage = 0.7
-            alpha, beta, gamma = 0.9, 0.0, 0.1
-        else:
-            human_coverage = 0.5
-            ai_coverage = 0.7
-            alpha, beta, gamma = 0.3, 0.5, 0.2
-        # Compute average trust/accuracy for selected human sources.
-        if selected:
-            avg_human_trust = sum([self.trust[a] for a in selected]) / len(selected)
-            avg_human_accuracy = sum([self.info_accuracy.get(a, 0.5) for a in selected]) / len(selected)
-        else:
-            avg_human_trust, avg_human_accuracy = 0, 0.5
-        if ai_candidates:
-            avg_ai_trust = sum([self.trust[a] for a in ai_candidates]) / len(ai_candidates)
-            avg_ai_accuracy = sum([self.info_accuracy.get(a, 0.5) for a in ai_candidates]) / len(ai_candidates)
-        else:
-            avg_ai_trust, avg_ai_accuracy = 0, 0.5
-        human_utility = alpha * avg_human_trust + beta * avg_human_accuracy + gamma * human_coverage
-        ai_utility = alpha * avg_ai_trust + beta * avg_ai_accuracy + gamma * ai_coverage
-
-        # Choose exclusively one info mode.
-        if ai_utility > human_utility:
-            self.info_mode = "ai"
-            # For AI mode, select up to 5 AI sources.
-            n_ai = min(5, len(ai_candidates))
-            if n_ai > 0:
-                if self.agent_type == "exploitative":
-                    selected = sorted(ai_candidates, key=lambda a: self.trust[a], reverse=True)[:n_ai]
-                else:
-                    selected = random.sample(ai_candidates, n_ai)
+                score = 0.2 * (self.trust[candidate] + bonus) + 0.6 * self.info_accuracy.get(candidate, 0.5) + 0.2 * 0.5
+            candidate_scores.append((candidate, score, "human"))
+        for candidate in [aid for aid in self.trust if aid.startswith("A_")]:
+            if self.agent_type == "exploitative":
+                score = 0.7 * self.trust[candidate] + 0.3 * self.info_accuracy.get(candidate, 0.5) + 0.0 * 0.8
             else:
-                selected = []
-        else:
-            self.info_mode = "human"
-            # Already selected from human sources.
+                score = 0.2 * self.trust[candidate] + 0.6 * self.info_accuracy.get(candidate, 0.5) + 0.2 * 0.8
+            candidate_scores.append((candidate, score, "ai"))
+        candidate_scores.sort(key=lambda x: x[1], reverse=True)
+        n = min(5, len(candidate_scores))
+        selected = candidate_scores[:n]
 
-        # Now, aggregate responses from all selected sources.
-        # We'll form a dictionary mapping each grid cell to a list of tuples: (source_id, reported_value).
-        cell_reports = {}
-        if self.info_mode == "human":
-            for source_id in selected:
+        # Query each selected candidate.
+        accepted_counts = {}
+        for candidate, score, mode in selected:
+            if mode == "human":
                 self.calls_human += 1
-                other = self.model.humans.get(source_id)
+                accepted = 0
+                other = self.model.humans.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full()
-                    # Optionally, simulate non-response if provider is in a high-destruction cell.
+                    # Simulate non-response if provider in high-destruction cell.
                     other_pos = other.pos
                     cell_level = self.model.disaster_grid[other_pos]
                     if cell_level >= 3 and random.random() < ((cell_level - 2) * 0.2):
                         rep = None
                     if rep is not None:
-                        for cell, value in rep.items():
-                            cell_reports.setdefault(cell, []).append((source_id, value))
-                # If no response, do nothing.
-        else:
-            for source_id in selected:
+                        for cell, reported_value in rep.items():
+                            d = abs(reported_value - self.beliefs[cell])
+                            P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
+                            if random.random() < P_accept:
+                                self.beliefs[cell] = reported_value
+                                accepted += 1
+                                self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                            else:
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                    accepted_counts[candidate] = accepted
+            else:
                 self.calls_ai += 1
-                other = self.model.ais.get(source_id)
+                accepted = 0
+                other = self.model.ais.get(candidate)
                 if other is not None:
-                    rep = other.provide_information_full(self.beliefs, trust=self.trust[source_id])
-                    for cell, value in rep.items():
-                        cell_reports.setdefault(cell, []).append((source_id, value))
-        # Now, perform opinion formation conflict resolution.
-        accepted_counts = self.opinion_formation(cell_reports)
-        # For each source that provided info, record the accepted count in pending_relief.
-        for source_id, count in accepted_counts.items():
-            self.pending_relief.append((self.model.tick, source_id, count))
-    
-    def opinion_formation(self, cell_reports):
-        """
-        For each cell with received reports, form an opinion.
-        For cell c with current belief x0 and reports S, let:
-           count_pos = # of reports with value > x0,
-           count_neg = # with value < x0.
-        Let ε = 5 if confirming, else 3.
-        If count_pos > ε, set new opinion = average of values > x0.
-        Else if count_neg > ε, set new opinion = average of values < x0.
-        Otherwise, set new opinion = the value in S that minimizes |v - x0|.
-        Also, for each source, if its reported value is within 0.1 of the chosen opinion, mark it as accepted.
-        Returns a dictionary mapping source_id to total accepted grid cell count.
-        """
-        accepted_counts = {}
-        for cell, reports in cell_reports.items():
-            x0 = self.beliefs[cell]
-            pos_vals = [v for (src, v) in reports if v > x0]
-            neg_vals = [v for (src, v) in reports if v < x0]
-            if self.attitude_type == "confirming":
-                eps = 5
-            else:
-                eps = 3
-            if len(pos_vals) > eps:
-                new_val = sum(pos_vals) / len(pos_vals)
-            elif len(neg_vals) > eps:
-                new_val = sum(neg_vals) / len(neg_vals)
-            else:
-                # Choose the report closest to x0.
-                new_val = min([v for (_, v) in reports], key=lambda v: abs(v - x0))
-            self.beliefs[cell] = new_val
-            for src, v in reports:
-                if abs(v - new_val) < 0.1:
-                    accepted_counts[src] = accepted_counts.get(src, 0) + 1
-                else:
-                    accepted_counts[src] = accepted_counts.get(src, 0)
-        return accepted_counts
+                    rep = other.provide_information_full(self.beliefs, trust=self.trust[candidate])
+                    for cell, reported_value in rep.items():
+                        d = abs(reported_value - self.beliefs[cell])
+                        P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
+                        if random.random() < P_accept:
+                            self.beliefs[cell] = reported_value
+                            accepted += 1
+                            self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                        else:
+                            self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                    accepted_counts[candidate] = accepted
+        for candidate, accepted in accepted_counts.items():
+            self.pending_relief.append((self.model.tick, candidate, accepted))
 
     def send_relief(self):
         pos = self.pos
+        # Increase number of tokens delivered from 3 to 6.
         if self.info_mode == "ai":
             cells = self.model.grid.get_neighborhood(pos, moore=True, radius=5, include_center=True)
         else:
             cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
         sorted_cells = sorted(cells, key=lambda c: self.beliefs[c], reverse=True)
-        selected = [c for c in sorted_cells if self.beliefs[c] >= 3][:3]
+        selected = [c for c in sorted_cells if self.beliefs[c] >= 3][:6]
         for cell in selected:
             self.pending_relief.append((self.model.tick, None, 0))
-    
+
     def process_relief_actions(self, current_tick, disaster_grid):
         new_pending = []
-        # Process pending relief actions after a delay of 2 ticks.
+        # Process pending relief events after 2 ticks.
         for entry in self.pending_relief:
             t, source_id, accepted_count = entry
             if current_tick - t >= 2:
-                # Determine reward based on the actual disaster level of a randomly chosen cell among those that received a token.
                 sample_cell = random.choice(list(self.beliefs.keys()))
                 level = disaster_grid[sample_cell]
+                # Basic reward: 2 for level 4, 5 for level 5.
                 reward = 2 if level == 4 else (5 if level == 5 else 0)
+                # Upgrade reward to 10 if cell in need and no token has been delivered before.
+                if level >= 4 and (self.model.assistance_exploit.get(sample_cell, 0) + self.model.assistance_explor.get(sample_cell, 0)) == 0:
+                    reward = 10
+                # If token delivered to a cell not in need (level <=2), apply penalty.
+                if level <= 2:
+                    reward = -0.05 * accepted_count
                 self.total_reward += reward
-                # Update assistance counters if the cell is in need.
-                if sample_cell in disaster_grid and disaster_grid[sample_cell] >= 4:
-                    # Update cumulative assistance.
-                    self.model.assistance[sample_cell] = self.model.assistance.get(sample_cell, 0) + 1
-                    # Update tokens delivered this tick.
+                # Update global assistance.
+                if level >= 4:
+                    if self.agent_type == "exploitative":
+                        self.model.assistance_exploit[sample_cell] = self.model.assistance_exploit.get(sample_cell, 0) + 1
+                    else:
+                        self.model.assistance_explor[sample_cell] = self.model.assistance_explor.get(sample_cell, 0) + 1
                     self.model.tokens_this_tick[sample_cell] = self.model.tokens_this_tick.get(sample_cell, 0) + 1
-                # For exploratory agents, if no reward was obtained, apply an extra penalty per accepted cell.
+                # For exploratory agents, if reward is 0, further penalize trust.
                 if source_id is not None and self.agent_type == "exploratory":
-                    if reward == 0 and accepted_count > 0:
-                        penalty = 0.05 * accepted_count
+                    if reward <= 0 and accepted_count > 0:
+                        penalty = 0.1 * accepted_count
                         self.trust[source_id] = max(0, self.trust[source_id] - penalty)
+                # For exploitative agents, if reward is 0, further penalize trust, but much less.
+                if source_id is not None and self.agent_type == "exploratory":
+                    if reward <= 0 and accepted_count > 0:
+                        penalty = 0.04 * accepted_count
+                        self.trust[source_id] = max(0, self.trust[source_id] - penalty)
+                # Now, update the information accuracy for the candidate source.
+                # For each pending event from source_id, if accepted_count > 0, update:
+                if source_id is not None and accepted_count > 0:
+                    old_acc = self.info_accuracy.get(source_id, 0.5)
+                    # Compute ratio = reward per accepted cell (max possible 10 per cell).
+                    ratio = reward / (10 * accepted_count)
+                    # Update: move accuracy toward ratio.
+                    new_acc = old_acc + self.learning_rate * (ratio - old_acc)
+                    # Clamp between 0 and 1.
+                    self.info_accuracy[source_id] = max(0, min(1, new_acc))
             else:
                 new_pending.append(entry)
         self.pending_relief = new_pending
@@ -437,12 +397,14 @@ class AIAgent(Agent):
         self.model = model
         self.memory = {}
         self.sensed = {}
+
     def sense_environment(self):
         num_cells = int(0.1 * self.model.width * self.model.height)
         self.sensed = {}
         cells = random.sample(list(self.model.disaster_grid.keys()), num_cells)
         for cell in cells:
             self.sensed[cell] = self.model.disaster_grid[cell]
+
     def provide_information_full(self, human_beliefs, trust):
         info = {}
         for cell, sensed_val in self.sensed.items():
@@ -454,6 +416,7 @@ class AIAgent(Agent):
                 corrected = sensed_val
             info[cell] = corrected
         return info
+
     def step(self):
         self.sense_environment()
 
@@ -461,13 +424,12 @@ class AIAgent(Agent):
 # Main: Run Simulation and Output Visuals
 #########################################
 if __name__ == "__main__":
-    # Parameters.
     share_exploitative = 0.5
     share_of_disaster = 0.2
-    initial_trust = 0.7
-    initial_ai_trust = 0.7
+    initial_trust = 0.5
+    initial_ai_trust = 0.5
     number_of_humans = 50
-    share_confirming = 0.5  # 50% of agents are "confirming"
+    share_confirming = 0.5  # 50% confirming agents.
     disaster_dynamics = 2
     shock_probability = 0.1
     shock_magnitude = 2
@@ -483,24 +445,27 @@ if __name__ == "__main__":
     for i in range(ticks):
         model.step()
 
-    # Visual 1: Distribution of assistance tokens delivered to cells in need.
-    # We consider only cells with disaster level 4 or 5.
-    tokens = [count for pos, count in model.assistance.items() if model.disaster_grid[pos] >= 4]
+    # Visual 1: Histogram of tokens delivered to cells in need (by agent type).
+    tokens_exploit = [model.assistance_exploit.get(pos, 0) for pos, level in model.disaster_grid.items() if level >= 4]
+    tokens_explor = [model.assistance_explor.get(pos, 0) for pos, level in model.disaster_grid.items() if level >= 4]
     plt.figure()
-    plt.boxplot(tokens)
-    plt.title("Box Plot: Distribution of Assistance Tokens\n(delivered to cells in need, level 4 or 5)")
-    plt.ylabel("Cumulative Tokens")
+    plt.hist([tokens_exploit, tokens_explor], bins=range(0, max(max(tokens_exploit, default=0), max(tokens_explor, default=0))+2),
+             label=["Exploitative", "Exploratory"], color=["skyblue", "lightgreen"], edgecolor='black')
+    plt.title("Histogram: Assistance Tokens Delivered\n(to Cells in Need, Level 4 or 5)")
+    plt.xlabel("Total Tokens Delivered")
+    plt.ylabel("Number of Cells")
+    plt.legend()
     plt.show()
 
-    # Visual 2: Evolution of unmet needs.
+    # Visual 2: Time series of unmet needs.
     plt.figure()
     plt.plot(range(len(model.unmet_needs_evolution)), model.unmet_needs_evolution, marker='o')
-    plt.title("Time Series: Cells in Need Without Assistance")
+    plt.title("Time Series: Unmet Needs\n(Number of Cells in Need Without Assistance)")
     plt.xlabel("Tick")
-    plt.ylabel("Number of Unassisted Cells (level ≥ 4)")
+    plt.ylabel("Unassisted Cells (Level ≥ 4)")
     plt.show()
 
-    # Visual 3: Trust evolution by agent type (human vs. AI sources).
+    # Visual 3: Trust evolution by agent type.
     ticks_range = list(range(ticks))
     exp_human_trust = [d[0] for d in model.trust_data]
     exp_ai_trust = [d[1] for d in model.trust_data]
