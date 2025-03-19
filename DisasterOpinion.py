@@ -210,7 +210,7 @@ class HumanAgent(Agent):
         self.id_num = id_num
         self.model = model
         self.agent_type = agent_type
-        # Attitude: "confirming" get D=0.3, delta=20, epsilon=5; others get D=0.5, delta=5, epsilon=3.
+        # Attitude: "confirming" agents get D=0.3, delta=20, epsilon=5; others get D=0.5, delta=5, epsilon=3.
         if random.random() < share_confirming:
             self.attitude_type = "confirming"
             self.D = 0.3
@@ -224,9 +224,9 @@ class HumanAgent(Agent):
 
         self.trust = {}
         self.info_accuracy = {}
-        self.Q = {}
+        self.Q = {}  # Q-values for candidate sources.
         self.beliefs = {(x, y): 0 for x in range(self.model.width) for y in range(self.model.height)}
-        # pending_relief entries: (tick, source_id, accepted_count)
+        # pending_relief entries: (tick, source_id, accepted_count, confirmations)
         self.pending_relief = []
         self.calls_human = 0
         self.calls_ai = 0
@@ -235,6 +235,9 @@ class HumanAgent(Agent):
         self.info_mode = "human"
         # Friend list is set in the model initialization.
         self.friends = set()
+        # RL parameters for information search:
+        self.lambda_parameter = 0.1   # Exploration probability (ε in ε–greedy)
+        self.q_parameter = 0.9        # Scaling factor for initializing Q-values
 
     def sense_environment(self):
         pos = self.pos
@@ -247,76 +250,131 @@ class HumanAgent(Agent):
                 self.beliefs[cell] = actual
 
     def request_information(self):
-        # Compute individual scores for each candidate source.
-        candidate_scores = []
-        for candidate in [aid for aid in self.trust if aid.startswith("H_")]:
-            bonus = 0.1 if candidate in self.friends else 0.0
-            # Use individual candidate trust (with bonus) and candidate's info_accuracy.
-            # We use the following weights:
-            # For exploitative: α = 0.9, β = 0.0, γ = 0.1;
-            # For exploratory: α = 0.3, β = 0.5, γ = 0.2.
-            if self.agent_type == "exploitative":
-                score = 0.7 * (self.trust[candidate] + bonus) + 0.3 * self.info_accuracy.get(candidate, 0.5) + 0.0 * 0.5
-            else:
-                score = 0.2 * (self.trust[candidate] + bonus) + 0.6 * self.info_accuracy.get(candidate, 0.5) + 0.2 * 0.5
-            candidate_scores.append((candidate, score, "human"))
-        for candidate in [aid for aid in self.trust if aid.startswith("A_")]:
-            if self.agent_type == "exploitative":
-                score = 0.7 * self.trust[candidate] + 0.3 * self.info_accuracy.get(candidate, 0.5) + 0.0 * 0.8
-            else:
-                score = 0.2 * self.trust[candidate] + 0.6 * self.info_accuracy.get(candidate, 0.5) + 0.2 * 0.8
-            candidate_scores.append((candidate, score, "ai"))
-        candidate_scores.sort(key=lambda x: x[1], reverse=True)
-        n = min(5, len(candidate_scores))
-        selected = candidate_scores[:n]
+        # Build candidate lists for humans and for AI.
+        human_candidates = []
+        ai_candidates = []
+        for candidate in self.trust:
+            if candidate.startswith("H_"):
+                bonus = 0.1 if candidate in self.friends else 0.0
+                if candidate not in self.Q:
+                    # For humans, exploitative agents emphasize trust; exploratory agents weight accuracy more.
+                    if self.agent_type == "exploitative":
+                        self.Q[candidate] = (self.trust[candidate] + bonus) * self.q_parameter
+                    else:
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.7 + self.trust[candidate] * 0.3) + bonus) * self.q_parameter
+                human_candidates.append((candidate, self.Q[candidate]))
+            elif candidate.startswith("A_"):
+                if candidate not in self.Q:
+                    coverage_bonus = 1.2  # AI coverage bonus factor.
+                    if self.agent_type == "exploitative":
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.4 + self.trust[candidate] * 0.6)) * self.q_parameter * coverage_bonus
+                    else:
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.6 + self.trust[candidate] * 0.4)) * self.q_parameter * coverage_bonus
+                ai_candidates.append((candidate, self.Q[candidate]))
+        # Mode decision: use different multipliers by agent type.
+        if self.agent_type == "exploitative":
+            best_human = max([q for _, q in human_candidates]) if human_candidates else 0
+            multiplier = 3.0
+        else:
+            best_human = max([q for _, q in human_candidates]) if human_candidates else 0
+            multiplier = 1.0  # Exploratory agents are less inclined to call humans.
+        best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
+        effective_human = best_human * multiplier
+        if random.random() < self.lambda_parameter:
+            mode_choice = random.choice(["human", "ai"])
+        else:
+            mode_choice = "human" if effective_human >= best_ai else "ai"
 
-        # Query each selected candidate.
         accepted_counts = {}
-        for candidate, score, mode in selected:
-            if mode == "human":
+        if mode_choice == "human":
+            # Select up to 3 human candidates via ε–greedy selection.
+            candidate_pool = human_candidates.copy()
+            num_calls = min(3, len(candidate_pool))
+            selected = []
+            for _ in range(num_calls):
+                if random.random() < self.lambda_parameter:
+                    choice = random.choice(candidate_pool)
+                else:
+                    choice = max(candidate_pool, key=lambda x: x[1])
+                selected.append(choice)
+                candidate_pool.remove(choice)
+            for candidate, q_val in selected:
                 self.calls_human += 1
                 accepted = 0
+                confirmations = 0
                 other = self.model.humans.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full()
-                    # Simulate non-response if provider in high-destruction cell.
+                    # Simulate non-response if provider is in a high-destruction cell.
                     other_pos = other.pos
                     cell_level = self.model.disaster_grid[other_pos]
                     if cell_level >= 3 and random.random() < ((cell_level - 2) * 0.2):
                         rep = None
                     if rep is not None:
                         for cell, reported_value in rep.items():
-                            d = abs(reported_value - self.beliefs[cell])
+                            old_belief = self.beliefs[cell]
+                            d = abs(reported_value - old_belief)
                             P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
+                            # Update trust differently for each agent type.
                             if random.random() < P_accept:
                                 self.beliefs[cell] = reported_value
                                 accepted += 1
-                                self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                                if reported_value == old_belief:
+                                    confirmations += 1
+                                # Exploitative agents get a robust boost.
+                                if self.agent_type == "exploitative":
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                                else:
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
                             else:
-                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
-                    accepted_counts[candidate] = accepted
+                                # Exploratory agents are more punitive.
+                                if self.agent_type == "exploitative":
+                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                                else:
+                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                accepted_counts[candidate] = (accepted, confirmations)
+                self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
+        else:  # mode_choice == "ai"
+            candidate_pool = ai_candidates.copy()
+            if candidate_pool:
+                if random.random() < self.lambda_parameter:
+                    selected = [random.choice(candidate_pool)]
+                else:
+                    selected = [max(candidate_pool, key=lambda x: x[1])]
             else:
+                selected = []
+            for candidate, q_val in selected:
                 self.calls_ai += 1
                 accepted = 0
+                confirmations = 0
                 other = self.model.ais.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full(self.beliefs, trust=self.trust[candidate])
                     for cell, reported_value in rep.items():
-                        d = abs(reported_value - self.beliefs[cell])
+                        old_belief = self.beliefs[cell]
+                        d = abs(reported_value - old_belief)
                         P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
                         if random.random() < P_accept:
                             self.beliefs[cell] = reported_value
                             accepted += 1
-                            self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                            if reported_value == old_belief:
+                                confirmations += 1
+                            # Similar trust update for AI candidates.
+                            if self.agent_type == "exploitative":
+                                self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                            else:
+                                self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
                         else:
-                            self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
-                    accepted_counts[candidate] = accepted
-        for candidate, accepted in accepted_counts.items():
-            self.pending_relief.append((self.model.tick, candidate, accepted))
+                            if self.agent_type == "exploitative":
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                            else:
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                accepted_counts[candidate] = (accepted, confirmations)
+                self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
 
     def send_relief(self):
         pos = self.pos
-        # Increase number of tokens delivered from 3 to 6.
+        # Deliver tokens to up to 6 cells (if beliefs indicate sufficient need).
         if self.info_mode == "ai":
             cells = self.model.grid.get_neighborhood(pos, moore=True, radius=5, include_center=True)
         else:
@@ -324,51 +382,45 @@ class HumanAgent(Agent):
         sorted_cells = sorted(cells, key=lambda c: self.beliefs[c], reverse=True)
         selected = [c for c in sorted_cells if self.beliefs[c] >= 3][:6]
         for cell in selected:
-            self.pending_relief.append((self.model.tick, None, 0))
+            self.pending_relief.append((self.model.tick, None, 0, 0))
 
     def process_relief_actions(self, current_tick, disaster_grid):
         new_pending = []
-        # Process pending relief events after 2 ticks.
         for entry in self.pending_relief:
-            t, source_id, accepted_count = entry
+            t, source_id, accepted_count, confirmations = entry
             if current_tick - t >= 2:
                 sample_cell = random.choice(list(self.beliefs.keys()))
                 level = disaster_grid[sample_cell]
-                # Basic reward: 2 for level 4, 5 for level 5.
                 reward = 2 if level == 4 else (5 if level == 5 else 0)
-                # Upgrade reward to 10 if cell in need and no token has been delivered before.
-                if level >= 4 and (self.model.assistance_exploit.get(sample_cell, 0) + self.model.assistance_explor.get(sample_cell, 0)) == 0:
+                if level >= 4 and (self.model.assistance_exploit.get(sample_cell, 0) +
+                                   self.model.assistance_explor.get(sample_cell, 0)) == 0:
                     reward = 10
-                # If token delivered to a cell not in need (level <=2), apply penalty.
                 if level <= 2:
                     reward = -0.05 * accepted_count
                 self.total_reward += reward
-                # Update global assistance.
                 if level >= 4:
                     if self.agent_type == "exploitative":
                         self.model.assistance_exploit[sample_cell] = self.model.assistance_exploit.get(sample_cell, 0) + 1
                     else:
                         self.model.assistance_explor[sample_cell] = self.model.assistance_explor.get(sample_cell, 0) + 1
                     self.model.tokens_this_tick[sample_cell] = self.model.tokens_this_tick.get(sample_cell, 0) + 1
-                # For exploratory agents, if reward is 0, further penalize trust.
-                if source_id is not None and self.agent_type == "exploratory":
-                    if reward <= 0 and accepted_count > 0:
-                        penalty = 0.1 * accepted_count
-                        self.trust[source_id] = max(0, self.trust[source_id] - penalty)
-                # For exploitative agents, if reward is 0, further penalize trust, but much less.
-                if source_id is not None and self.agent_type == "exploratory":
-                    if reward <= 0 and accepted_count > 0:
-                        penalty = 0.04 * accepted_count
-                        self.trust[source_id] = max(0, self.trust[source_id] - penalty)
-                # Now, update the information accuracy for the candidate source.
-                # For each pending event from source_id, if accepted_count > 0, update:
                 if source_id is not None and accepted_count > 0:
+                    if self.agent_type == "exploitative":
+                        # For exploitative agents, confirmation is the key.
+                        confirmation_ratio = confirmations / accepted_count
+                        correction = 0.1 * (reward / (10 * accepted_count))
+                        Q_target = confirmation_ratio + correction
+                    else:
+                        # For exploratory agents, accuracy (reward) is the target.
+                        Q_target = reward / (10 * accepted_count)
+                    old_Q = self.Q.get(source_id, self.trust.get(source_id, 0.5))
+                    if source_id.startswith("H_"):
+                        self.Q[source_id] = old_Q + self.learning_rate * (Q_target - old_Q)
+                    else:
+                        coverage_bonus = 1.2
+                        self.Q[source_id] = old_Q + self.learning_rate * (Q_target * coverage_bonus - old_Q)
                     old_acc = self.info_accuracy.get(source_id, 0.5)
-                    # Compute ratio = reward per accepted cell (max possible 10 per cell).
-                    ratio = reward / (10 * accepted_count)
-                    # Update: move accuracy toward ratio.
-                    new_acc = old_acc + self.learning_rate * (ratio - old_acc)
-                    # Clamp between 0 and 1.
+                    new_acc = old_acc + self.learning_rate * (Q_target - old_acc)
                     self.info_accuracy[source_id] = max(0, min(1, new_acc))
             else:
                 new_pending.append(entry)
@@ -441,7 +493,7 @@ if __name__ == "__main__":
     model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
                           number_of_humans, share_confirming, disaster_dynamics, shock_probability, shock_magnitude,
                           trust_update_mode, exploitative_correction_factor, width, height)
-    ticks = 30
+    ticks = 600
     for i in range(ticks):
         model.step()
 
@@ -449,8 +501,10 @@ if __name__ == "__main__":
     tokens_exploit = [model.assistance_exploit.get(pos, 0) for pos, level in model.disaster_grid.items() if level >= 4]
     tokens_explor = [model.assistance_explor.get(pos, 0) for pos, level in model.disaster_grid.items() if level >= 4]
     plt.figure()
-    plt.hist([tokens_exploit, tokens_explor], bins=range(0, max(max(tokens_exploit, default=0), max(tokens_explor, default=0))+2),
-             label=["Exploitative", "Exploratory"], color=["skyblue", "lightgreen"], edgecolor='black')
+    plt.hist([tokens_exploit, tokens_explor],
+             bins=range(0, max(max(tokens_exploit, default=0), max(tokens_explor, default=0)) + 2),
+             label=["Exploitative", "Exploratory"],
+             color=["skyblue", "lightgreen"], edgecolor='black')
     plt.title("Histogram: Assistance Tokens Delivered\n(to Cells in Need, Level 4 or 5)")
     plt.xlabel("Total Tokens Delivered")
     plt.ylabel("Number of Cells")
