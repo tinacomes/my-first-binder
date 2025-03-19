@@ -7,11 +7,11 @@ from DisasterOpinion import DisasterModel
 # -----------------------------
 # Settings for simulation experiments
 # -----------------------------
-exploitative_shares = [0.3, 0.5, 0.7]      # Fraction of exploitative agents.
-confirming_shares = [0.3, 0.5, 0.7]         # Fraction of confirming agents.
-disaster_dynamics_vals = [1, 2, 3]          # Different disaster dynamics.
+exploitative_shares = [0.5]      # Fraction of exploitative agents.
+confirming_shares = [0]         # Fraction of confirming agents.
+disaster_dynamics_vals = [1]          # Different disaster dynamics.
 
-runs_per_scenario = 5
+runs_per_scenario = 25
 ticks = 500  # Increased number of ticks
 
 # Create a folder to store run results.
@@ -20,7 +20,7 @@ if not os.path.exists(results_dir):
     os.makedirs(results_dir)
 
 # -----------------------------
-# Run simulations and save results for each run
+# Run simulations and save results for each run one at a time
 # -----------------------------
 scenario_keys = []  # to store scenario keys
 for exp_share in exploitative_shares:
@@ -29,7 +29,6 @@ for exp_share in exploitative_shares:
             scenario_key = f"exp_{exp_share}_conf_{conf_share}_dyn_{dynamics}"
             scenario_keys.append(scenario_key)
             for run in range(runs_per_scenario):
-                # Create and run the model
                 model = DisasterModel(
                     share_exploitative=exp_share,
                     share_of_disaster=0.2,
@@ -46,7 +45,7 @@ for exp_share in exploitative_shares:
                     height=50)
                 for t in range(ticks):
                     model.step()
-                # Record final unmet needs (from the last tick).
+                # Record final unmet needs from the last tick.
                 unmet_final = model.unmet_needs_evolution[-1]
                 # Compute average trust and call data separately for exploitative and exploratory agents.
                 exp_human_trust = []
@@ -81,28 +80,28 @@ for exp_share in exploitative_shares:
                 calls_avg = (np.mean(calls_human), np.mean(calls_ai))
                 # Get the trust evolution over time (model.trust_data is a list of 4-tuples).
                 trust_evolution = np.array(model.trust_data)  # shape: (ticks, 4)
-                # Save results to compressed file.
+                # Save results to a compressed file.
                 filename = os.path.join(results_dir, f"{scenario_key}_run_{run}.npz")
                 np.savez_compressed(filename, unmet=unmet_final,
                                     exp_trust=exp_trust, expl_trust=expl_trust,
                                     calls_avg=calls_avg, trust_evolution=trust_evolution)
                 print(f"Saved {filename}")
-                # Clean up to free memory.
-                del model
+                # Delete model and temporary variables to free memory.
+                del model, trust_evolution, exp_human_trust, exp_ai_trust, expl_human_trust, expl_ai_trust, calls_human, calls_ai
                 gc.collect()
 
 # -----------------------------
-# Aggregate results across runs for each scenario without loading everything at once.
+# Aggregate results across runs for each scenario one scenario at a time.
 # -----------------------------
 # Prepare dictionaries to hold aggregated data.
 all_scenarios_unmet = {}
-all_scenarios_exp_trust_evo = {}   # will hold list of arrays (shape: ticks x 2) per run for exploitative agents.
-all_scenarios_expl_trust_evo = {}  # similarly for exploratory agents.
+all_scenarios_exp_trust_evo = {}   # List of arrays (runs, ticks, 2) for exploitative agents.
+all_scenarios_expl_trust_evo = {}  # List of arrays (runs, ticks, 2) for exploratory agents.
 all_scenarios_calls = {}
 
 for key in scenario_keys:
     unmet_list = []
-    exp_trust_evo_list = []  # each element: (ticks, 2) array for exploitative agents (human, AI)
+    exp_trust_evo_list = []  # each element: (ticks, 2) array for exploitative agents
     expl_trust_evo_list = []  # each element: (ticks, 2) array for exploratory agents
     calls_list = []
     for run in range(runs_per_scenario):
@@ -110,14 +109,17 @@ for key in scenario_keys:
         with np.load(filename) as data:
             unmet_list.append(data["unmet"])
             trust_evo = data["trust_evolution"]  # shape (ticks, 4)
-            # Split trust evolution: first 2 columns for exploitative, last 2 for exploratory.
             exp_trust_evo_list.append(trust_evo[:, :2])
             expl_trust_evo_list.append(trust_evo[:, 2:])
             calls_list.append(data["calls_avg"])
+        del data, trust_evo
+        gc.collect()
     all_scenarios_unmet[key] = np.array(unmet_list)
     all_scenarios_exp_trust_evo[key] = np.array(exp_trust_evo_list)   # shape (runs, ticks, 2)
     all_scenarios_expl_trust_evo[key] = np.array(expl_trust_evo_list)   # shape (runs, ticks, 2)
     all_scenarios_calls[key] = np.array(calls_list)
+    del unmet_list, exp_trust_evo_list, expl_trust_evo_list, calls_list
+    gc.collect()
 
 # -----------------------------
 # Produce Box Plots for Final Metrics
@@ -167,11 +169,11 @@ plt.show()
 # -----------------------------
 ticks_array = np.arange(ticks)
 
-# Exploitative agents trust evolution.
+# Plot for Exploitative Agents:
 plt.figure(figsize=(12, 6))
 for key in scenario_labels:
     data = all_scenarios_exp_trust_evo[key]  # shape (runs, ticks, 2)
-    # Compute mean and 5th/95th percentiles for human and AI trust separately.
+    # Separate trust for human sources and AI sources.
     mean_human = np.mean(data[:, :, 0], axis=0)
     mean_ai = np.mean(data[:, :, 1], axis=0)
     perc5_human = np.percentile(data[:, :, 0], 5, axis=0)
@@ -185,11 +187,11 @@ for key in scenario_labels:
 plt.xlabel("Ticks")
 plt.ylabel("Trust Value")
 plt.title("Evolution of Trust over Time (Exploitative Agents)")
-plt.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1,1))
+plt.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1, 1))
 plt.tight_layout()
 plt.show()
 
-# Exploratory agents trust evolution.
+# Plot for Exploratory Agents:
 plt.figure(figsize=(12, 6))
 for key in scenario_labels:
     data = all_scenarios_expl_trust_evo[key]  # shape (runs, ticks, 2)
@@ -206,6 +208,6 @@ for key in scenario_labels:
 plt.xlabel("Ticks")
 plt.ylabel("Trust Value")
 plt.title("Evolution of Trust over Time (Exploratory Agents)")
-plt.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1,1))
+plt.legend(fontsize="small", loc="upper left", bbox_to_anchor=(1, 1))
 plt.tight_layout()
 plt.show()
