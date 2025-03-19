@@ -218,8 +218,8 @@ class HumanAgent(Agent):
             self.epsilon = 5
         else:
             self.attitude_type = "other"
-            self.D = 0.5
-            self.delta = 5
+            self.D = 0.9
+            self.delta = 3
             self.epsilon = 3
 
         self.trust = {}
@@ -479,7 +479,7 @@ if __name__ == "__main__":
     share_exploitative = 0.5
     share_of_disaster = 0.2
     initial_trust = 0.5
-    initial_ai_trust = 0.5
+    initial_ai_trust = 0.75
     number_of_humans = 50
     share_confirming = 0.5  # 50% confirming agents.
     disaster_dynamics = 2
@@ -537,9 +537,9 @@ if __name__ == "__main__":
     plt.show()
 
     # Visual 4: Information request calls by agent type.
-    calls_exp_human = [d[0] for d in model.calls_data]
+    calls_exp_human = [d[0]/5 for d in model.calls_data]
     calls_exp_ai = [d[1] for d in model.calls_data]
-    calls_expl_human = [d[2] for d in model.calls_data]
+    calls_expl_human = [d[2]/5 for d in model.calls_data]
     calls_expl_ai = [d[3] for d in model.calls_data]
     plt.figure()
     plt.plot(ticks_range, calls_exp_human, label="Exploitative: Calls to Humans")
