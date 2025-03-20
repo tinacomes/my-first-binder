@@ -214,7 +214,7 @@ class HumanAgent(Agent):
         self.id_num = id_num
         self.model = model
         self.agent_type = agent_type
-        # Attitude: "confirming" agents get D=0.3, delta=20, epsilon=5; others get D=0.5, delta=5, epsilon=3.
+        # Attitude parameters.
         if random.random() < share_confirming:
             self.attitude_type = "confirming"
             self.D = 0.3
@@ -237,15 +237,20 @@ class HumanAgent(Agent):
         self.total_reward = 0
         self.learning_rate = 0.1
         self.info_mode = "human"
-        # Friend list is set in the model initialization.
-        self.friends = set()
-        # RL parameters for information search:
+        self.friends = set()  # Friend list set in the model.
+        # RL parameters:
         self.lambda_parameter = 0.1   # Exploration probability (ε in ε–greedy)
         self.q_parameter = 0.9        # Scaling factor for initializing Q-values
+        
+        # For delayed belief updates (used by exploratory agents).
+        self.delayed_reports = []  # Each entry: (tick, aggregated_reports)
 
     def sense_environment(self):
         pos = self.pos
-        cells = self.model.grid.get_neighborhood(pos, moore=True, include_center=True)
+        # Exploitative agents sense only their immediate neighborhood (radius=1),
+        # whereas exploratory agents sense a broader area (radius=5).
+        radius = 1 if self.agent_type == "exploitative" else 5
+        cells = self.model.grid.get_neighborhood(pos, moore=True, radius=radius, include_center=True)
         for cell in cells:
             actual = self.model.disaster_grid[cell]
             if random.random() < 0.3:
@@ -254,34 +259,66 @@ class HumanAgent(Agent):
                 self.beliefs[cell] = actual
 
     def request_information(self):
-        # Build candidate lists for humans and for AI.
+        # Build candidate lists for humans and AI.
         human_candidates = []
         ai_candidates = []
-        for candidate in self.trust:
-            if candidate.startswith("H_"):
-                bonus = 0.1 if candidate in self.friends else 0.0
-                if candidate not in self.Q:
-                    # For humans, exploitative agents emphasize trust; exploratory agents weight accuracy more.
-                    if self.agent_type == "exploitative":
+        if self.agent_type == "exploitative":
+            # For exploitative agents, first collect all candidates and then build a local list.
+            all_human_candidates = []
+            local_human_candidates = []
+            all_ai_candidates = []
+            local_ai_candidates = []
+            for candidate in self.trust:
+                if candidate.startswith("H_"):
+                    bonus = 0.1 if candidate in self.friends else 0.0
+                    if candidate not in self.Q:
                         self.Q[candidate] = (self.trust[candidate] + bonus) * self.q_parameter
-                    else:
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.7 + self.trust[candidate] * 0.3) + bonus) * self.q_parameter
-                human_candidates.append((candidate, self.Q[candidate]))
-            elif candidate.startswith("A_"):
-                if candidate not in self.Q:
-                    coverage_bonus = 1.2  # AI coverage bonus factor.
-                    if self.agent_type == "exploitative":
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.4 + self.trust[candidate] * 0.6)) * self.q_parameter * coverage_bonus
-                    else:
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.6 + self.trust[candidate] * 0.4)) * self.q_parameter * coverage_bonus
-                ai_candidates.append((candidate, self.Q[candidate]))
-        # Mode decision: use different multipliers by agent type.
+                    candidate_tuple = (candidate, self.Q[candidate])
+                    all_human_candidates.append(candidate_tuple)
+                    candidate_agent = self.model.humans.get(candidate)
+                    if candidate_agent is not None:
+                        dist = math.sqrt((self.pos[0] - candidate_agent.pos[0])**2 +
+                                         (self.pos[1] - candidate_agent.pos[1])**2)
+                        if dist <= 2:
+                            local_human_candidates.append(candidate_tuple)
+                elif candidate.startswith("A_"):
+                    if candidate not in self.Q:
+                        coverage_bonus = 1.2
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5)*0.4 + self.trust[candidate]*0.6)) * self.q_parameter * coverage_bonus
+                    candidate_tuple = (candidate, self.Q[candidate])
+                    all_ai_candidates.append(candidate_tuple)
+                    candidate_agent = self.model.ais.get(candidate)
+                    if candidate_agent is not None and hasattr(candidate_agent, 'pos'):
+                        try:
+                            dist = math.sqrt((self.pos[0] - candidate_agent.pos[0])**2 +
+                                             (self.pos[1] - candidate_agent.pos[1])**2)
+                            if dist <= 2:
+                                local_ai_candidates.append(candidate_tuple)
+                        except Exception:
+                            local_ai_candidates.append(candidate_tuple)
+            # Use local candidates if available; otherwise, use the complete list.
+            human_candidates = local_human_candidates if local_human_candidates else all_human_candidates
+            ai_candidates = local_ai_candidates if local_ai_candidates else all_ai_candidates
+        else:
+            # Exploratory agents use all candidates.
+            for candidate in self.trust:
+                if candidate.startswith("H_"):
+                    bonus = 0.1 if candidate in self.friends else 0.0
+                    if candidate not in self.Q:
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5)*0.7 + self.trust[candidate]*0.3) + bonus) * self.q_parameter
+                    human_candidates.append((candidate, self.Q[candidate]))
+                elif candidate.startswith("A_"):
+                    if candidate not in self.Q:
+                        coverage_bonus = 1.2
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5)*0.6 + self.trust[candidate]*0.4)) * self.q_parameter * coverage_bonus
+                    ai_candidates.append((candidate, self.Q[candidate]))
+        # Mode decision.
         if self.agent_type == "exploitative":
             best_human = max([q for _, q in human_candidates]) if human_candidates else 0
             multiplier = 3.0
         else:
             best_human = max([q for _, q in human_candidates]) if human_candidates else 0
-            multiplier = 1.0  # Exploratory agents are less inclined to call humans.
+            multiplier = 1.0
         best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
         effective_human = best_human * multiplier
         if random.random() < self.lambda_parameter:
@@ -294,15 +331,17 @@ class HumanAgent(Agent):
 
         accepted_counts = {}
         if mode_choice == "human":
-            # Select up to 3 human candidates via ε–greedy selection.
             candidate_pool = human_candidates.copy()
-            num_calls = min(3, len(candidate_pool))
+            num_calls = 3  # Force 3 calls regardless of candidate pool length.
             selected = []
             for _ in range(num_calls):
-                if random.random() < self.lambda_parameter:
+                if candidate_pool and random.random() >= self.lambda_parameter:
+                    choice = max(candidate_pool, key=lambda x: x[1])
+                elif candidate_pool:
                     choice = random.choice(candidate_pool)
                 else:
-                    choice = max(candidate_pool, key=lambda x: x[1])
+                    # If no candidates are available (should not happen), skip.
+                    continue
                 selected.append(choice)
                 candidate_pool.remove(choice)
             for candidate, q_val in selected:
@@ -312,14 +351,12 @@ class HumanAgent(Agent):
                 other = self.model.humans.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full()
-                    # Simulate non-response if provider is in a high-destruction cell.
                     other_pos = other.pos
                     cell_level = self.model.disaster_grid[other_pos]
                     if cell_level >= 3 and random.random() < ((cell_level - 2) * 0.2):
                         rep = None
                     if rep is not None:
                         for cell, reported_value in rep.items():
-                            # Accumulate the report for aggregation.
                             aggregated_reports.setdefault(cell, []).append(reported_value)
                             old_belief = self.beliefs[cell]
                             d = abs(reported_value - old_belief)
@@ -375,42 +412,61 @@ class HumanAgent(Agent):
                                 self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
                 accepted_counts[candidate] = (accepted, confirmations)
                 self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
-        # After processing all candidates, aggregate the collected reports to update beliefs.
-        for cell, reports in aggregated_reports.items():
-            avg_report = sum(reports) / len(reports)
-            current_value = self.beliefs[cell]
-            difference = avg_report - current_value
-            # The more reports received, the larger the update factor.
-            scaling = 1 + 0.1 * (len(reports) - 1)
-            self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
-            
+        # Update beliefs based on aggregated reports.
+        if self.agent_type == "exploitative":
+            # Immediate update.
+            for cell, reports in aggregated_reports.items():
+                avg_report = sum(reports) / len(reports)
+                current_value = self.beliefs[cell]
+                difference = avg_report - current_value
+                scaling = 1 + 0.1 * (len(reports) - 1)
+                self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
+        else:
+            # Exploratory agents update with a 2-tick delay.
+            if aggregated_reports:
+                self.delayed_reports.append((self.model.tick, aggregated_reports))
+                
+    def update_delayed_beliefs(self):
+        new_buffer = []
+        for t, reports in self.delayed_reports:
+            if self.model.tick - t >= 2:
+                for cell, rep_list in reports.items():
+                    avg_report = sum(rep_list) / len(rep_list)
+                    current_value = self.beliefs[cell]
+                    difference = avg_report - current_value
+                    scaling = 1 + 0.1 * (len(rep_list) - 1)
+                    self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
+            else:
+                new_buffer.append((t, reports))
+        self.delayed_reports = new_buffer
+
     def send_relief(self):
-        # Agents can send up to 5 tokens per tick and may choose cells far away if the need is high.
+        # Agents can send up to 5 tokens per tick.
         tokens_to_send = 5
-        # Consider all grid cells.
-        cells = list(self.model.disaster_grid.keys())
-        # Determine positions of friends (if any) to prioritize help for friends.
+        # Exploitative agents consider only their immediate neighborhood (radius = 1),
+        # whereas exploratory agents consider the entire grid.
+        if self.agent_type == "exploitative":
+            cells = self.model.grid.get_neighborhood(self.pos, moore=True, radius=1, include_center=True)
+        else:
+            cells = list(self.model.disaster_grid.keys())
+        # Determine friend positions.
         friend_positions = set()
         for friend_id in self.friends:
             if friend_id in self.model.humans:
                 friend_positions.add(self.model.humans[friend_id].pos)
-        # Score each cell by its belief value; add bonus if a friend is present.
         def cell_score(cell):
             score = self.beliefs.get(cell, 0)
             if cell in friend_positions:
-                score += 1  # friend bonus
+                score += 1  # bonus for friend presence
             return score
         sorted_cells = sorted(cells, key=cell_score, reverse=True)
-        # Select cells whose score is at least 3.
         selected = [c for c in sorted_cells if cell_score(c) >= 3][:tokens_to_send]
-        # Append pending relief with the chosen target cell.
         for cell in selected:
             self.pending_relief.append((self.model.tick, None, 0, 0, cell))
 
     def process_relief_actions(self, current_tick, disaster_grid):
         new_pending = []
         for entry in self.pending_relief:
-            # Check if a target cell was specified in the pending relief entry.
             if len(entry) == 5:
                 t, source_id, accepted_count, confirmations, target_cell = entry
             else:
@@ -472,6 +528,8 @@ class HumanAgent(Agent):
         self.sense_environment()
         self.request_information()
         self.send_relief()
+        if self.agent_type == "exploratory":
+            self.update_delayed_beliefs()
 
 class AIAgent(Agent):
     def __init__(self, unique_id, model):
@@ -529,7 +587,7 @@ if __name__ == "__main__":
         model.step()
 
     # Define bin widths for histograms.
-    bin_width_correct = 10
+    bin_width_correct = 50   # Now using bin size 50 for correct assistance
     bin_width_incorrect = 50
 
     # Visual 1: Histogram of tokens delivered to cells in need (by agent type).
