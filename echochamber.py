@@ -1,23 +1,15 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import random
-import math
+import random, math, networkx as nx
 from mesa import Agent, Model
 from mesa.space import MultiGrid
 from mesa.time import RandomActivation
-import networkx as nx
 from DisasterModelNew import DisasterModel
 
-# (Re-use the DisasterModel, HumanAgent, AIAgent definitions from above.)
-# For brevity, assume that the full base code (with our modifications) is defined here.
-# We then add a helper function to compute the echo chamber metric.
+# (Assume here the full definitions of DisasterModel, HumanAgent, and AIAgent are available, 
+# with our modifications from previous scripts.)
 
 def compute_echo_chamber_metric(model):
-    """
-    For each human agent, compute the absolute difference between
-    its average belief (across all grid cells) and the average belief of its friends.
-    Then, average these differences over all agents.
-    """
     differences = []
     for agent in model.humans.values():
         if agent.friends:
@@ -25,14 +17,26 @@ def compute_echo_chamber_metric(model):
             friend_avgs = []
             for fid in agent.friends:
                 if fid in model.humans:
-                    friend_agent = model.humans[fid]
-                    friend_avgs.append(np.mean(list(friend_agent.beliefs.values())))
+                    friend_avgs.append(np.mean(list(model.humans[fid].beliefs.values())))
             if friend_avgs:
                 differences.append(abs(my_avg - np.mean(friend_avgs)))
     return np.mean(differences) if differences else None
 
+def compute_assistance_metrics(model):
+    assisted_in_need = 0
+    assisted_incorrect = 0
+    for pos, level in model.disaster_grid.items():
+        if level >= 4:
+            tokens = model.assistance_exploit.get(pos, 0) + model.assistance_explor.get(pos, 0)
+            if tokens > 0:
+                assisted_in_need += 1
+        if level <= 2:
+            tokens_incorrect = model.assistance_incorrect_exploit.get(pos, 0) + model.assistance_incorrect_explor.get(pos, 0)
+            if tokens_incorrect > 0:
+                assisted_incorrect += 1
+    return assisted_in_need, assisted_incorrect
+
 def run_simulation(share_confirming, num_ticks=300):
-    # Use fixed parameters except for share_confirming.
     model = DisasterModel(
         share_exploitative=0.5,
         share_of_disaster=0.2,
@@ -50,28 +54,61 @@ def run_simulation(share_confirming, num_ticks=300):
     )
     for t in range(num_ticks):
         model.step()
-    return compute_echo_chamber_metric(model)
+    echo_metric = compute_echo_chamber_metric(model)
+    assisted_in_need, assisted_incorrect = compute_assistance_metrics(model)
+    return echo_metric, assisted_in_need, assisted_incorrect
 
-# Parameter sweep for share_confirming
 share_confirming_values = [0.2, 0.5, 0.8]
-num_runs = 5
-results = []
+num_runs = 10
+
+# Store metrics for each parameter value.
+echo_data = {}
+need_data = {}
+incorrect_data = {}
 
 for sc in share_confirming_values:
-    run_metrics = []
+    echo_list = []
+    need_list = []
+    incorrect_list = []
     for run in range(num_runs):
-        metric = run_simulation(sc)
-        run_metrics.append(metric)
-    results.append(np.mean(run_metrics))
+        echo, need, incorrect = run_simulation(sc)
+        echo_list.append(echo)
+        need_list.append(need)
+        incorrect_list.append(incorrect)
+    echo_data[sc] = echo_list
+    need_data[sc] = need_list
+    incorrect_data[sc] = incorrect_list
 
-plt.figure()
-plt.plot(share_confirming_values, results, marker='o', linestyle='-')
-plt.xlabel("Share Confirming")
-plt.ylabel("Echo Chamber Metric\n(Avg Abs Diff in Beliefs Among Friends)")
-plt.title("Impact of Attitude on Echo Chamber Emergence")
+# Plotting with percentiles.
+def plot_with_errorbars(x_vals, data_dict, ylabel, title):
+    means = []
+    lower = []  # difference from 25th percentile to mean
+    upper = []  # difference from mean to 75th percentile
+    for x in x_vals:
+        data = np.array(data_dict[x])
+        mean = np.mean(data)
+        p25 = np.percentile(data, 25)
+        p75 = np.percentile(data, 75)
+        means.append(mean)
+        lower.append(mean - p25)
+        upper.append(p75 - mean)
+    plt.errorbar(x_vals, means, yerr=[lower, upper], fmt='o-', capsize=5)
+    plt.xlabel("Parameter Value")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True)
+
+plt.figure(figsize=(14,4))
+plt.subplot(1,3,1)
+plot_with_errorbars(share_confirming_values, echo_data, "Echo Chamber Metric", "Echo Chamber vs. Share Confirming")
+plt.subplot(1,3,2)
+plot_with_errorbars(share_confirming_values, need_data, "Cells in Need Assisted", "Assistance in Need vs. Share Confirming")
+plt.subplot(1,3,3)
+plot_with_errorbars(share_confirming_values, incorrect_data, "Cells Incorrectly Assisted", "Incorrect Assistance vs. Share Confirming")
+plt.tight_layout()
 plt.show()
 
 # Rationale:
-# This script tests how predisposition to confirm (or not) affects the similarity of beliefs among friends.
-# We expect that a higher share of confirming agents (e.g. 0.8) yields lower average differences (i.e. stronger echo chambers)
-# than a lower share (e.g. 0.2).
+# By varying the share of confirming agents, we test whether predisposition to confirm reinforces echo chambers 
+# (i.e. lower divergence in opinions among friends) and whether it changes the pattern of assistance.
+# Displaying percentiles (the 25th, 50th, and 75th) along with the mean offers insight into the variability of outcomes.
