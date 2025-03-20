@@ -1,0 +1,107 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import random
+import math
+import networkx as nx
+from mesa import Agent, Model
+from mesa.space import MultiGrid
+from mesa.time import RandomActivation
+from DisasterModelNew import DisasterModel
+
+# (Assume the full model definitions from Script A are included.)
+
+def compute_echo_chamber_metric(model):
+    differences = []
+    for agent in model.humans.values():
+        if agent.friends:
+            my_avg = np.mean(list(agent.beliefs.values()))
+            friend_avgs = []
+            for fid in agent.friends:
+                if fid in model.humans:
+                    friend_avgs.append(np.mean(list(model.humans[fid].beliefs.values())))
+            if friend_avgs:
+                differences.append(abs(my_avg - np.mean(friend_avgs)))
+    return np.mean(differences) if differences else None
+
+def compute_assistance_metrics(model):
+    assisted_in_need = 0
+    assisted_incorrect = 0
+    for pos, level in model.disaster_grid.items():
+        if level >= 4:
+            tokens = model.assistance_exploit.get(pos, 0) + model.assistance_explor.get(pos, 0)
+            if tokens > 0:
+                assisted_in_need += 1
+        if level <= 2:
+            tokens_incorrect = model.assistance_incorrect_exploit.get(pos, 0) + model.assistance_incorrect_explor.get(pos, 0)
+            if tokens_incorrect > 0:
+                assisted_incorrect += 1
+    return assisted_in_need, assisted_incorrect
+
+def run_simulation(shock_magnitude, disaster_dynamics, num_ticks=300):
+    model = DisasterModel(
+        share_exploitative=0.5,
+        share_of_disaster=0.2,
+        initial_trust=0.5,
+        initial_ai_trust=0.75,
+        number_of_humans=50,
+        share_confirming=0.5,  # fixed here
+        disaster_dynamics=disaster_dynamics,
+        shock_probability=0.1,
+        shock_magnitude=shock_magnitude,
+        trust_update_mode="average",
+        exploitative_correction_factor=1.0,
+        width=50,
+        height=50
+    )
+    for t in range(num_ticks):
+        model.step()
+    echo_metric = compute_echo_chamber_metric(model)
+    assisted_in_need, assisted_incorrect = compute_assistance_metrics(model)
+    return echo_metric, assisted_in_need, assisted_incorrect
+
+shock_magnitude_values = [1, 2, 4]
+disaster_dynamics_fixed = 2
+num_runs = 3
+
+echo_results = []
+assisted_need_results = []
+assisted_incorrect_results = []
+
+for sm in shock_magnitude_values:
+    echo_metrics = []
+    need_metrics = []
+    incorrect_metrics = []
+    for run in range(num_runs):
+        echo, need, incorrect = run_simulation(shock_magnitude=sm, disaster_dynamics=disaster_dynamics_fixed)
+        echo_metrics.append(echo)
+        need_metrics.append(need)
+        incorrect_metrics.append(incorrect)
+    echo_results.append(np.mean(echo_metrics))
+    assisted_need_results.append(np.mean(need_metrics))
+    assisted_incorrect_results.append(np.mean(incorrect_metrics))
+
+plt.figure(figsize=(12,4))
+plt.subplot(1,3,1)
+plt.plot(shock_magnitude_values, echo_results, marker='s', linestyle='-')
+plt.xlabel("Shock Magnitude")
+plt.ylabel("Echo Chamber Metric")
+plt.title("Echo Chamber vs. Shock Magnitude")
+
+plt.subplot(1,3,2)
+plt.plot(shock_magnitude_values, assisted_need_results, marker='o', linestyle='-', color='green')
+plt.xlabel("Shock Magnitude")
+plt.ylabel("Cells in Need Assisted")
+plt.title("Assistance in Need vs. Shock Magnitude")
+
+plt.subplot(1,3,3)
+plt.plot(shock_magnitude_values, assisted_incorrect_results, marker='^', linestyle='-', color='red')
+plt.xlabel("Shock Magnitude")
+plt.ylabel("Incorrect Assistance")
+plt.title("Incorrect Assistance vs. Shock Magnitude")
+plt.tight_layout()
+plt.show()
+
+# Rationale:
+# This script examines the effect of environmental stress (via shock magnitude) on belief updating and assistance.
+# Extreme shocks may either force agents to update their beliefs (reducing echo chambers) or drive them to rely on familiar sources.
+# The additional metrics reveal whether more cells in need are assisted and whether misdirected assistance changes with disaster severity.
