@@ -6,6 +6,7 @@ import networkx as nx
 from mesa import Agent, Model
 from mesa.space import MultiGrid
 from mesa.time import RandomActivation
+from DisasterModelNew import DisasterModel
 
 # --- Modified AIAgent to include an ai_adaptation flag ---
 class AIAgent(Agent):
