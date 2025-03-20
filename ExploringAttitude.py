@@ -6,6 +6,7 @@ import networkx as nx
 from mesa import Agent, Model
 from mesa.space import MultiGrid
 from mesa.time import RandomActivation
+from DisasterModelNew import DisasterModel
 
 def compute_echo_chamber_metric(model):
     differences = []
@@ -34,7 +35,7 @@ def compute_assistance_metrics(model):
                 assisted_incorrect += 1
     return assisted_in_need, assisted_incorrect
 
-def run_simulation(share_exploitative, num_ticks=300):
+def run_simulation(share_exploitative, num_ticks=100):
     model = DisasterModel(
         share_exploitative=share_exploitative,  # e.g. 0.2 means 20% exploitative, 80% exploratory
         share_of_disaster=0.2,
@@ -56,48 +57,83 @@ def run_simulation(share_exploitative, num_ticks=300):
     assisted_in_need, assisted_incorrect = compute_assistance_metrics(model)
     return echo_metric, assisted_in_need, assisted_incorrect
 
-share_exploitative_values = [0.2, 0.5, 0.8]
-num_runs = 5
+# Use sorted parameter values for share_exploitative.
+share_exploitative_values = [0, 0.1, 0.33, 0.66]
+num_runs = 10
 
-echo_results = []
-assisted_need_results = []
-assisted_incorrect_results = []
+# Dictionaries to store lists of metrics for each parameter value.
+echo_metrics_by_param = {}
+need_metrics_by_param = {}
+incorrect_metrics_by_param = {}
 
 for se in share_exploitative_values:
-    echo_metrics = []
-    need_metrics = []
-    incorrect_metrics = []
+    echo_list = []
+    need_list = []
+    incorrect_list = []
     for run in range(num_runs):
         echo, need, incorrect = run_simulation(se)
-        echo_metrics.append(echo)
-        need_metrics.append(need)
-        incorrect_metrics.append(incorrect)
-    echo_results.append(np.mean(echo_metrics))
-    assisted_need_results.append(np.mean(need_metrics))
-    assisted_incorrect_results.append(np.mean(incorrect_metrics))
+        echo_list.append(echo)
+        need_list.append(need)
+        incorrect_list.append(incorrect)
+    echo_metrics_by_param[se] = echo_list
+    need_metrics_by_param[se] = need_list
+    incorrect_metrics_by_param[se] = incorrect_list
 
-plt.figure(figsize=(12,4))
+# Helper function to compute mean, 25th, and 75th percentiles.
+def compute_stats(data_list):
+    data = np.array(data_list)
+    mean = np.mean(data)
+    p25 = np.percentile(data, 25)
+    p75 = np.percentile(data, 75)
+    return mean, p25, p75
+
+# Prepare data for errorbar plotting.
+x = share_exploitative_values
+
+echo_means = []
+echo_err_lower = []
+echo_err_upper = []
+need_means = []
+need_err_lower = []
+need_err_upper = []
+incorrect_means = []
+incorrect_err_lower = []
+incorrect_err_upper = []
+
+for se in x:
+    mean, p25, p75 = compute_stats(echo_metrics_by_param[se])
+    echo_means.append(mean)
+    echo_err_lower.append(mean - p25)
+    echo_err_upper.append(p75 - mean)
+    
+    mean, p25, p75 = compute_stats(need_metrics_by_param[se])
+    need_means.append(mean)
+    need_err_lower.append(mean - p25)
+    need_err_upper.append(p75 - mean)
+    
+    mean, p25, p75 = compute_stats(incorrect_metrics_by_param[se])
+    incorrect_means.append(mean)
+    incorrect_err_lower.append(mean - p25)
+    incorrect_err_upper.append(p75 - mean)
+
+plt.figure(figsize=(14,4))
 plt.subplot(1,3,1)
-plt.plot(share_exploitative_values, echo_results, marker='^', linestyle='-')
+plt.errorbar(x, echo_means, yerr=[echo_err_lower, echo_err_upper], fmt='o-', capsize=5)
 plt.xlabel("Share Exploitative")
 plt.ylabel("Echo Chamber Metric")
-plt.title("Echo Chamber vs. Exploring Ratio")
+plt.title("Echo Chamber vs. Share Exploitative")
 
 plt.subplot(1,3,2)
-plt.plot(share_exploitative_values, assisted_need_results, marker='o', linestyle='-', color='green')
+plt.errorbar(x, need_means, yerr=[need_err_lower, need_err_upper], fmt='o-', capsize=5, color='green')
 plt.xlabel("Share Exploitative")
 plt.ylabel("Cells in Need Assisted")
-plt.title("Assistance in Need vs. Exploring Ratio")
+plt.title("Assistance in Need vs. Share Exploitative")
 
 plt.subplot(1,3,3)
-plt.plot(share_exploitative_values, assisted_incorrect_results, marker='s', linestyle='-', color='red')
+plt.errorbar(x, incorrect_means, yerr=[incorrect_err_lower, incorrect_err_upper], fmt='o-', capsize=5, color='red')
 plt.xlabel("Share Exploitative")
 plt.ylabel("Incorrect Assistance")
-plt.title("Incorrect Assistance vs. Exploring Ratio")
+plt.title("Incorrect Assistance vs. Share Exploitative")
+
 plt.tight_layout()
 plt.show()
-
-# Rationale:
-# By varying the fraction of exploring agents, we test whether a more diverse (broad-search) population yields higher diversity in beliefs
-# (i.e. higher echo chamber metric) and how that affects the delivery of assistance.
-# A predominance of local, exploitative agents is expected to produce stronger echo chambers.
