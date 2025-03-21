@@ -1,9 +1,12 @@
 #!/usr/bin/env python
 """
 Script D – Variation of AI Agent Behaviour (Adaptation vs. No Adaptation)
-This script compares runs with ai_adaptation=True and ai_adaptation=False.
-Outputs are written to CSV files, aggregated, and a bar chart is plotted.
+
+This script compares simulation runs with AI agents that adapt their output 
+to human beliefs (ai_adaptation=True) versus those that do not (ai_adaptation=False).
+Results are written to CSV files, aggregated, and a bar chart is plotted.
 """
+
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,6 +14,7 @@ import random, math, networkx as nx
 import gc
 from DisasterModelNew import DisasterModel
 
+# Standard metric functions.
 def compute_echo_chamber_metric(model):
     differences = []
     for agent in model.humans.values():
@@ -38,7 +42,9 @@ def compute_assistance_metrics(model):
                 assisted_incorrect += 1
     return assisted_in_need, assisted_incorrect
 
+# Run a single simulation for Script D.
 def run_single_simulation_D(run_id, num_ticks, ai_adaptation):
+    # Create the model without passing ai_adaptation (not supported by DisasterModel.__init__).
     model = DisasterModel(
         share_exploitative=0.5,
         share_of_disaster=0.2,
@@ -52,9 +58,18 @@ def run_single_simulation_D(run_id, num_ticks, ai_adaptation):
         trust_update_mode="average",
         exploitative_correction_factor=1.0,
         width=50,
-        height=50,
-        ai_adaptation=ai_adaptation  # this parameter should control AI behavior
+        height=50
     )
+    # If ai_adaptation is False, override each AI agent's provide_information_full method.
+    if not ai_adaptation:
+        # Define a no-adaptation version that returns raw sensed values.
+        def no_adaptation_provide_information_full(self, human_beliefs, trust):
+            # Simply return the sensed values without any correction.
+            return self.sensed
+        # Patch each AI agent.
+        for ai in model.ais.values():
+            ai.provide_information_full = no_adaptation_provide_information_full.__get__(ai, type(ai))
+    
     for t in range(num_ticks):
         model.step()
     h_echo = compute_echo_chamber_metric(model)
@@ -94,6 +109,7 @@ if __name__ == "__main__":
         p75 = np.percentile(data, 75)
         return mean, abs(mean - p25), abs(p75 - mean)
     
+    # We compare the human echo chamber metric.
     adapt_vals = data_adapt[:,2]
     noadapt_vals = data_noadapt[:,2]
     mean_adapt, err_low_adapt, err_high_adapt = compute_stats(adapt_vals)
