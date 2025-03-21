@@ -6,58 +6,60 @@ import random, math, networkx as nx
 from mesa import Agent, Model
 from mesa.space import MultiGrid
 from mesa.time import RandomActivation
-# Import the base model (assumed to be in DisasterModelNew.py)
+# Import your updated DisasterModel and HumanAgent from your module.
 from DisasterModelNew import DisasterModel, HumanAgent
 
 ############################################
 # Monkey-patch HumanAgent to record AI reports.
 ############################################
+if not hasattr(HumanAgent, "_ai_patched"):
+    original_init = HumanAgent.__init__
+    def patched_init(self, unique_id, model, id_num, agent_type="exploitative", share_confirming=0.6):
+        original_init(self, unique_id, model, id_num, agent_type, share_confirming)
+        self.ai_reported = {}  # dictionary: cell -> list of AI provided values
+    HumanAgent.__init__ = patched_init
+    HumanAgent._ai_patched = True
 
-# We add an attribute ai_reported to record, for each cell, the values provided by AI.
-original_init = HumanAgent.__init__
-def patched_init(self, unique_id, model, id_num, agent_type="exploitative", share_confirming=0.5):
-    original_init(self, unique_id, model, id_num, agent_type, share_confirming)
-    self.ai_reported = {}  # dictionary: cell -> list of AI provided values
-HumanAgent.__init__ = patched_init
-
-# In request_information, in the branch for AI calls, record the provided information.
-original_request_information = HumanAgent.request_information
-def patched_request_information(self):
-    # Call the original method.
-    original_request_information(self)
-    # (Assumption: In the original code, when mode=="ai", the agent obtains rep from an AI candidate.
-    # We modify that branch here to record the reported values.)
-    # For simplicity, if self.ai_reported was not updated there, we assume that in the original code
-    # the branch handling AI calls is similar to the human branch.
-    # We assume that somewhere in the code, after an AI candidate is selected,
-    # a block like the following is executed:
-    #
-    #    rep = other.provide_information_full(self.beliefs, trust=self.trust[candidate])
-    #    for cell, reported_value in rep.items():
-    #         self.ai_reported.setdefault(cell, []).append(reported_value)
-    #
-    # If not, you may insert the following snippet at the end of the AI branch.
-    # (Here, we simply ensure that if no AI report has been recorded, then self.ai_reported remains {}.)
-    pass
-HumanAgent.request_information = patched_request_information
+if not hasattr(HumanAgent, "_ai_request_patched"):
+    original_request_information = HumanAgent.request_information
+    def patched_request_information(self):
+        original_request_information(self)
+        # If an AI candidate was used and no report was recorded, use a fallback.
+        # (This fallback simply records the current belief for each cell if no AI report was captured.)
+        if not self.ai_reported and hasattr(self, "calls_ai") and self.calls_ai > 0:
+            for cell in self.beliefs:
+                self.ai_reported.setdefault(cell, []).append(self.beliefs[cell])
+    HumanAgent.request_information = patched_request_information
+    HumanAgent._ai_request_patched = True
 
 ############################################
 # Define additional metric: AI Echo Chamber Metric.
 ############################################
 def compute_ai_echo_chamber_metric(model):
     differences = []
+    # For each human agent...
     for agent in model.humans.values():
-        if hasattr(agent, "ai_reported") and agent.ai_reported:
+        # Determine the subset of cells where the agent has sent relief.
+        # Here we use pending_relief entries that include a target cell.
+        target_cells = set()
+        for entry in agent.pending_relief:
+            if len(entry) == 5:
+                # entry = (tick, source_id, accepted_count, confirmations, target_cell)
+                target_cells.add(entry[4])
+        # Alternatively, you might use cells where tokens were delivered.
+        if target_cells and hasattr(agent, "ai_reported") and agent.ai_reported:
             cell_diffs = []
-            for cell, reports in agent.ai_reported.items():
-                avg_ai = np.mean(reports)
-                cell_diffs.append(abs(agent.beliefs[cell] - avg_ai))
+            for cell in target_cells:
+                if cell in agent.ai_reported:
+                    avg_ai = np.mean(agent.ai_reported[cell])
+                    diff = abs(agent.beliefs[cell] - avg_ai)
+                    cell_diffs.append(diff)
             if cell_diffs:
                 differences.append(np.mean(cell_diffs))
     return np.mean(differences) if differences else None
 
 ############################################
-# Functions to compute metrics from a simulation run.
+# Standard metrics from simulation.
 ############################################
 def compute_echo_chamber_metric(model):
     differences = []
@@ -86,14 +88,14 @@ def compute_assistance_metrics(model):
                 assisted_incorrect += 1
     return assisted_in_need, assisted_incorrect
 
-def run_simulation(share_confirming, num_ticks=200):
+def run_simulation(share_exploitative, num_ticks=200):
     model = DisasterModel(
-        share_exploitative=0.5,
+        share_exploitative=share_exploitative,  # Vary this parameter (e.g., 0.2, 0.5, 0.8)
         share_of_disaster=0.2,
         initial_trust=0.5,
         initial_ai_trust=0.75,
         number_of_humans=50,
-        share_confirming=share_confirming,
+        share_confirming=0.5,  # fixed
         disaster_dynamics=2,
         shock_probability=0.1,
         shock_magnitude=2,
@@ -102,42 +104,40 @@ def run_simulation(share_confirming, num_ticks=200):
         width=50,
         height=50
     )
-    # Run simulation
     for t in range(num_ticks):
         model.step()
-    # Compute metrics
     human_echo = compute_echo_chamber_metric(model)
     ai_echo = compute_ai_echo_chamber_metric(model)
     assisted_in_need, assisted_incorrect = compute_assistance_metrics(model)
     return human_echo, ai_echo, assisted_in_need, assisted_incorrect
 
 ############################################
-# Experiment: Vary share_confirming (as an example)
+# Experiment: Vary share_exploitative
 ############################################
-share_confirming_values = [0.2, 0.5, 0.8]
+share_exploitative_values = [0.2, 0.5, 0.8]
 num_runs = 10
 
-# Store metrics per parameter value.
+# Dictionaries to store lists of metrics for each parameter value.
 human_echo_data = {}
 ai_echo_data = {}
 need_data = {}
 incorrect_data = {}
 
-for sc in share_confirming_values:
+for se in share_exploitative_values:
     h_echo_list = []
     ai_echo_list = []
     need_list = []
     incorrect_list = []
     for run in range(num_runs):
-        h_echo, ai_echo, need, incorrect = run_simulation(sc, num_ticks=200)
+        h_echo, ai_echo, need, incorrect = run_simulation(se, num_ticks=200)
         h_echo_list.append(h_echo)
         ai_echo_list.append(ai_echo)
         need_list.append(need)
         incorrect_list.append(incorrect)
-    human_echo_data[sc] = h_echo_list
-    ai_echo_data[sc] = ai_echo_list
-    need_data[sc] = need_list
-    incorrect_data[sc] = incorrect_list
+    human_echo_data[se] = h_echo_list
+    ai_echo_data[se] = ai_echo_list
+    need_data[se] = need_list
+    incorrect_data[se] = incorrect_list
 
 ############################################
 # Helper function to compute mean, 25th, and 75th percentiles.
@@ -147,21 +147,20 @@ def compute_stats(data_list):
     mean = np.mean(data)
     p25 = np.percentile(data, 25)
     p75 = np.percentile(data, 75)
-    return mean, p25, p75
+    return mean, abs(mean - p25), abs(p75 - mean)
 
-# Prepare data for plotting.
 def prepare_plot_data(param_values, data_dict):
     means = []
-    lower = []  # mean - 25th
-    upper = []  # 75th - mean
+    lower = []  # error from mean to 25th (absolute value)
+    upper = []  # error from mean to 75th (absolute value)
     for p in param_values:
-        mean, p25, p75 = compute_stats(data_dict[p])
+        mean, err_low, err_high = compute_stats(data_dict[p])
         means.append(mean)
-        lower.append(mean - p25)
-        upper.append(p75 - mean)
+        lower.append(err_low)
+        upper.append(err_high)
     return means, lower, upper
 
-x = share_confirming_values
+x = share_exploitative_values
 
 human_echo_means, human_echo_lower, human_echo_upper = prepare_plot_data(x, human_echo_data)
 ai_echo_means, ai_echo_lower, ai_echo_upper = prepare_plot_data(x, ai_echo_data)
@@ -171,26 +170,27 @@ incorrect_means, incorrect_lower, incorrect_upper = prepare_plot_data(x, incorre
 plt.figure(figsize=(16,4))
 plt.subplot(1,4,1)
 plt.errorbar(x, human_echo_means, yerr=[human_echo_lower, human_echo_upper], fmt='o-', capsize=5)
-plt.xlabel("Share Confirming")
+plt.xlabel("Share Exploitative")
 plt.ylabel("Human Echo Chamber Metric")
-plt.title("Human Echo Chamber vs. Attitude")
+plt.title("Human Echo vs. Share Exploitative")
 
 plt.subplot(1,4,2)
 plt.errorbar(x, ai_echo_means, yerr=[ai_echo_lower, ai_echo_upper], fmt='o-', capsize=5, color='orange')
-plt.xlabel("Share Confirming")
+plt.xlabel("Share Exploitative")
 plt.ylabel("AI Echo Chamber Metric")
-plt.title("AI Echo Chamber vs. Attitude")
+plt.title("AI Echo vs. Share Exploitative")
 
 plt.subplot(1,4,3)
 plt.errorbar(x, need_means, yerr=[need_lower, need_upper], fmt='o-', capsize=5, color='green')
-plt.xlabel("Share Confirming")
+plt.xlabel("Share Exploitative")
 plt.ylabel("Cells in Need Assisted")
-plt.title("Assistance in Need vs. Attitude")
+plt.title("Assistance in Need vs. Share Exploitative")
 
 plt.subplot(1,4,4)
 plt.errorbar(x, incorrect_means, yerr=[incorrect_lower, incorrect_upper], fmt='o-', capsize=5, color='red')
-plt.xlabel("Share Confirming")
-plt.ylabel("Cells Incorrectly Assisted")
-plt.title("Incorrect Assistance vs. Attitude")
+plt.xlabel("Share Exploitative")
+plt.ylabel("Incorrect Assistance")
+plt.title("Incorrect Assistance vs. Share Exploitative")
+
 plt.tight_layout()
 plt.show()
