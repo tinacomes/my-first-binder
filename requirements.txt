@@ -3,3 +3,6 @@ numpy
 matplotlib
 networkx
 mesa[viz]
+seaborn
+multiprocessing
+tqdm
