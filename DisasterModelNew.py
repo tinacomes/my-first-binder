@@ -24,6 +24,7 @@ class DisasterModel(Model):
                  shock_probability=0.1,       # Probability that a shock occurs.
                  shock_magnitude=2,           # Maximum shock magnitude.
                  trust_update_mode="average", # (Not used further here)
+                 ai_alignment_level=0.5,      # ai alignment
                  exploitative_correction_factor=1.0,  # (Not used further)
                  width=50, height=50):
         super().__init__()
@@ -41,6 +42,7 @@ class DisasterModel(Model):
         self.shock_magnitude = shock_magnitude
         self.trust_update_mode = trust_update_mode
         self.exploitative_correction_factor = exploitative_correction_factor
+        self.ai_alignment_level = ai_alignment_level
 
         self.grid = MultiGrid(width, height, torus=False)
         self.schedule = RandomActivation(self)
@@ -516,13 +518,14 @@ class AIAgent(Agent):
         for cell, sensed_val in self.sensed.items():
             human_val = human_beliefs.get(cell, sensed_val)
             if abs(sensed_val - human_val) > 1:
-                correction_factor = 1 - min(1, trust)
-                corrected = round(sensed_val + correction_factor * (human_val - sensed_val))
+                # Use the model's alignment parameter instead of trust directly
+                alignment_factor = self.model.ai_alignment_level * (1 - min(1, trust))
+                corrected = round(sensed_val + alignment_factor * (human_val - sensed_val))
             else:
                 corrected = sensed_val
             info[cell] = corrected
         return info
-
+        
     def step(self):
         self.sense_environment()
 
