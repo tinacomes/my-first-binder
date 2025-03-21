@@ -1,7 +1,9 @@
+#!/usr/bin/env python
 import random
 import math
 import matplotlib.pyplot as plt
 import networkx as nx
+import numpy as np
 
 from mesa import Agent, Model
 from mesa.space import MultiGrid
@@ -47,11 +49,10 @@ class DisasterModel(Model):
         # For tracking assistance:
         self.assistance_exploit = {}  # cell -> tokens delivered by exploitative agents (correct assistance)
         self.assistance_explor = {}   # cell -> tokens delivered by exploratory agents (correct assistance)
-        # New dictionaries for tokens delivered incorrectly (to cells with level 2 or lower)
-        self.assistance_incorrect_exploit = {}
+        self.assistance_incorrect_exploit = {}  # for cells with level <= 2
         self.assistance_incorrect_explor = {}
 
-        self.unmet_needs_evolution = []  # Number of cells in need (level >= 4) that got no token this tick.
+        self.unmet_needs_evolution = []  # Number of cells in need (level>=4) that got no token this tick.
 
         # Create disaster grid.
         self.disaster_grid = {}
@@ -71,7 +72,7 @@ class DisasterModel(Model):
                     level = 0
                 self.disaster_grid[(x, y)] = level
 
-        # Create a Watts–Strogatz network (for friend selection if desired).
+        # Create a Watts–Strogatz network for friend selection.
         self.social_network = nx.watts_strogatz_graph(self.num_humans, 4, 0.1)
 
         # Create human agents.
@@ -85,7 +86,7 @@ class DisasterModel(Model):
             y = random.randrange(height)
             self.grid.place_agent(a, (x, y))
 
-        # Initialize trust and info_accuracy.
+        # Initialize trust and info_accuracy for each human.
         for i in range(self.num_humans):
             agent_id = f"H_{i}"
             agent = self.humans[agent_id]
@@ -94,7 +95,7 @@ class DisasterModel(Model):
                     continue
                 agent.trust[f"H_{j}"] = random.uniform(self.base_trust - 0.05, self.base_trust + 0.05)
                 agent.info_accuracy[f"H_{j}"] = random.uniform(0.4, 0.6)
-            # Set friend list: randomly select 5% of humans (at least one) and boost trust.
+            # Set friend list.
             friend_count = max(1, int(0.05 * self.num_humans))
             possible_friends = [f"H_{j}" for j in range(self.num_humans) if f"H_{j}" != agent_id]
             agent.friends = set(random.sample(possible_friends, friend_count))
@@ -114,9 +115,10 @@ class DisasterModel(Model):
             y = random.randrange(height)
             self.grid.place_agent(a, (x, y))
 
-        self.trust_data = []   # (exploitative-human, exploitative-AI, exploratory-human, exploratory-AI)
-        self.calls_data = []   # (# calls to humans, # calls to AI) per group.
-        self.rewards_data = [] # (total_reward_exploitative, total_reward_exploratory)
+        # Data tracking.
+        self.trust_data = []   # Tuple per tick: (exp_human, exp_ai, expl_human, expl_ai)
+        self.calls_data = []   # Tuple per tick: (calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai)
+        self.rewards_data = [] # Tuple per tick: (total_reward_exploitative, total_reward_exploratory)
 
     def update_disaster(self):
         new_grid = {}
@@ -151,7 +153,7 @@ class DisasterModel(Model):
         self.disaster_grid = new_grid
 
     def step(self):
-        self.tokens_this_tick = {}  # To record tokens delivered this tick.
+        self.tokens_this_tick = {}  # Reset tokens this tick.
         self.update_disaster()
         self.schedule.step()
         # Compute unmet needs: count cells with level>=4 that got no token.
@@ -178,26 +180,26 @@ class DisasterModel(Model):
             ai_vals = [v for key, v in agent.trust.items() if key.startswith("A_")]
             if agent.agent_type == "exploitative":
                 if human_vals:
-                    exp_human_trust.append(sum(human_vals) / len(human_vals))
+                    exp_human_trust.append(np.mean(human_vals))
                 if ai_vals:
-                    exp_ai_trust.append(sum(ai_vals) / len(ai_vals))
+                    exp_ai_trust.append(np.mean(ai_vals))
                 calls_exp_human += agent.calls_human
                 calls_exp_ai += agent.calls_ai
             else:
                 if human_vals:
-                    expl_human_trust.append(sum(human_vals) / len(human_vals))
+                    expl_human_trust.append(np.mean(human_vals))
                 if ai_vals:
-                    expl_ai_trust.append(sum(ai_vals) / len(ai_vals))
+                    expl_ai_trust.append(np.mean(ai_vals))
                 calls_expl_human += agent.calls_human
                 calls_expl_ai += agent.calls_ai
             agent.calls_human = 0
             agent.calls_ai = 0
             agent.total_reward = 0
 
-        avg_exp_human_trust = sum(exp_human_trust) / len(exp_human_trust) if exp_human_trust else 0
-        avg_exp_ai_trust = sum(exp_ai_trust) / len(exp_ai_trust) if exp_ai_trust else 0
-        avg_expl_human_trust = sum(expl_human_trust) / len(expl_human_trust) if expl_human_trust else 0
-        avg_expl_ai_trust = sum(expl_ai_trust) / len(expl_ai_trust) if expl_ai_trust else 0
+        avg_exp_human_trust = np.mean(exp_human_trust) if exp_human_trust else 0
+        avg_exp_ai_trust = np.mean(exp_ai_trust) if exp_ai_trust else 0
+        avg_expl_human_trust = np.mean(expl_human_trust) if expl_human_trust else 0
+        avg_expl_ai_trust = np.mean(expl_ai_trust) if expl_ai_trust else 0
 
         self.trust_data.append((avg_exp_human_trust, avg_exp_ai_trust, avg_expl_human_trust, avg_expl_ai_trust))
         self.calls_data.append((calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai))
@@ -230,25 +232,20 @@ class HumanAgent(Agent):
         self.info_accuracy = {}
         self.Q = {}  # Q-values for candidate sources.
         self.beliefs = {(x, y): 0 for x in range(self.model.width) for y in range(self.model.height)}
-        # pending_relief entries now include target cell: (tick, source_id, accepted_count, confirmations, target_cell)
-        self.pending_relief = []
+        self.pending_relief = []  # Each entry: (tick, source_id, accepted_count, confirmations, target_cell)
         self.calls_human = 0
         self.calls_ai = 0
         self.total_reward = 0
         self.learning_rate = 0.1
         self.info_mode = "human"
-        self.friends = set()  # Friend list set in the model.
-        # RL parameters:
-        self.lambda_parameter = 0.1   # Exploration probability (ε in ε–greedy)
-        self.q_parameter = 0.9        # Scaling factor for initializing Q-values
-        
-        # For delayed belief updates (used by exploratory agents).
-        self.delayed_reports = []  # Each entry: (tick, aggregated_reports)
+        self.friends = set()  # Set in model initialization.
+        self.lambda_parameter = 0.1   # Exploration probability.
+        self.q_parameter = 0.9        # Scaling factor for Q-values.
+        self.delayed_reports = []  # For exploratory agents.
+        self.ai_reported = {}      # To record AI-provided information.
 
     def sense_environment(self):
         pos = self.pos
-        # Exploitative agents sense only their immediate neighborhood (radius=1),
-        # whereas exploratory agents sense a broader area (radius=5).
         radius = 1 if self.agent_type == "exploitative" else 5
         cells = self.model.grid.get_neighborhood(pos, moore=True, radius=radius, include_center=True)
         for cell in cells:
@@ -259,11 +256,9 @@ class HumanAgent(Agent):
                 self.beliefs[cell] = actual
 
     def request_information(self):
-        # Build candidate lists for humans and AI.
         human_candidates = []
         ai_candidates = []
         if self.agent_type == "exploitative":
-            # For exploitative agents, first collect all candidates and then build a local list.
             all_human_candidates = []
             local_human_candidates = []
             all_ai_candidates = []
@@ -284,7 +279,7 @@ class HumanAgent(Agent):
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
                         coverage_bonus = 1.2
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5)*0.4 + self.trust[candidate]*0.6)) * self.q_parameter * coverage_bonus
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.4 + self.trust[candidate] * 0.6)) * self.q_parameter * coverage_bonus
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_ai_candidates.append(candidate_tuple)
                     candidate_agent = self.model.ais.get(candidate)
@@ -296,23 +291,20 @@ class HumanAgent(Agent):
                                 local_ai_candidates.append(candidate_tuple)
                         except Exception:
                             local_ai_candidates.append(candidate_tuple)
-            # Use local candidates if available; otherwise, use the complete list.
             human_candidates = local_human_candidates if local_human_candidates else all_human_candidates
             ai_candidates = local_ai_candidates if local_ai_candidates else all_ai_candidates
         else:
-            # Exploratory agents use all candidates.
             for candidate in self.trust:
                 if candidate.startswith("H_"):
                     bonus = 0.1 if candidate in self.friends else 0.0
                     if candidate not in self.Q:
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5)*0.7 + self.trust[candidate]*0.3) + bonus) * self.q_parameter
+                        self.Q[candidate] = (((self.info_accuracy.get(candidate, 0.5) * 0.7) + (self.trust[candidate] * 0.3)) + bonus) * self.q_parameter
                     human_candidates.append((candidate, self.Q[candidate]))
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
                         coverage_bonus = 1.2
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5)*0.6 + self.trust[candidate]*0.4)) * self.q_parameter * coverage_bonus
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.6 + self.trust[candidate] * 0.4)) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
-        # Mode decision.
         if self.agent_type == "exploitative":
             best_human = max([q for _, q in human_candidates]) if human_candidates else 0
             multiplier = 3.0
@@ -321,29 +313,21 @@ class HumanAgent(Agent):
             multiplier = 1.0
         best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
         effective_human = best_human * multiplier
-        if random.random() < self.lambda_parameter:
-            mode_choice = random.choice(["human", "ai"])
-        else:
-            mode_choice = "human" if effective_human >= best_ai else "ai"
-
-        # Dictionary to accumulate reports: cell -> list of reported values.
+        mode_choice = "human" if (random.random() >= self.lambda_parameter and effective_human >= best_ai) else "ai"
         aggregated_reports = {}
-
         accepted_counts = {}
         if mode_choice == "human":
             candidate_pool = human_candidates.copy()
-            num_calls = 3  # Force 3 calls regardless of candidate pool length.
+            num_calls = 3  # Force 3 calls.
             selected = []
             for _ in range(num_calls):
-                if candidate_pool and random.random() >= self.lambda_parameter:
-                    choice = max(candidate_pool, key=lambda x: x[1])
-                elif candidate_pool:
-                    choice = random.choice(candidate_pool)
-                else:
-                    # If no candidates are available (should not happen), skip.
-                    continue
-                selected.append(choice)
-                candidate_pool.remove(choice)
+                if candidate_pool:
+                    if random.random() < self.lambda_parameter:
+                        choice = random.choice(candidate_pool)
+                    else:
+                        choice = max(candidate_pool, key=lambda x: x[1])
+                    selected.append(choice)
+                    candidate_pool.remove(choice)
             for candidate, q_val in selected:
                 self.calls_human += 1
                 accepted = 0
@@ -365,24 +349,15 @@ class HumanAgent(Agent):
                                 accepted += 1
                                 if reported_value == old_belief:
                                     confirmations += 1
-                                if self.agent_type == "exploitative":
-                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
-                                else:
-                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
+                                self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
                             else:
-                                if self.agent_type == "exploitative":
-                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
-                                else:
-                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
                 accepted_counts[candidate] = (accepted, confirmations)
                 self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
         else:  # mode_choice == "ai"
             candidate_pool = ai_candidates.copy()
             if candidate_pool:
-                if random.random() < self.lambda_parameter:
-                    selected = [random.choice(candidate_pool)]
-                else:
-                    selected = [max(candidate_pool, key=lambda x: x[1])]
+                selected = [max(candidate_pool, key=lambda x: x[1])] if random.random() >= self.lambda_parameter else [random.choice(candidate_pool)]
             else:
                 selected = []
             for candidate, q_val in selected:
@@ -401,20 +376,17 @@ class HumanAgent(Agent):
                             accepted += 1
                             if reported_value == old_belief:
                                 confirmations += 1
-                            if self.agent_type == "exploitative":
-                                self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
-                            else:
-                                self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
+                            self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
                         else:
-                            if self.agent_type == "exploitative":
-                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
-                            else:
-                                self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                            self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
                 accepted_counts[candidate] = (accepted, confirmations)
                 self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
-        # Update beliefs based on aggregated reports.
+        # Record AI reports if AI mode was used.
+        if mode_choice == "ai":
+            for cell, rep_val in aggregated_reports.items():
+                self.ai_reported.setdefault(cell, []).append(rep_val)
+        # Update beliefs.
         if self.agent_type == "exploitative":
-            # Immediate update.
             for cell, reports in aggregated_reports.items():
                 avg_report = sum(reports) / len(reports)
                 current_value = self.beliefs[cell]
@@ -422,7 +394,6 @@ class HumanAgent(Agent):
                 scaling = 1 + 0.1 * (len(reports) - 1)
                 self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
         else:
-            # Exploratory agents update with a 2-tick delay.
             if aggregated_reports:
                 self.delayed_reports.append((self.model.tick, aggregated_reports))
                 
@@ -441,15 +412,11 @@ class HumanAgent(Agent):
         self.delayed_reports = new_buffer
 
     def send_relief(self):
-        # Agents can send up to 5 tokens per tick.
         tokens_to_send = 5
-        # Exploitative agents consider only their immediate neighborhood (radius = 1),
-        # whereas exploratory agents consider the entire grid.
         if self.agent_type == "exploitative":
             cells = self.model.grid.get_neighborhood(self.pos, moore=True, radius=1, include_center=True)
         else:
             cells = list(self.model.disaster_grid.keys())
-        # Determine friend positions.
         friend_positions = set()
         for friend_id in self.friends:
             if friend_id in self.model.humans:
@@ -457,7 +424,7 @@ class HumanAgent(Agent):
         def cell_score(cell):
             score = self.beliefs.get(cell, 0)
             if cell in friend_positions:
-                score += 1  # bonus for friend presence
+                score += 1
             return score
         sorted_cells = sorted(cells, key=cell_score, reverse=True)
         selected = [c for c in sorted_cells if cell_score(c) >= 3][:tokens_to_send]
@@ -475,8 +442,7 @@ class HumanAgent(Agent):
             if current_tick - t >= 2:
                 level = disaster_grid[target_cell]
                 reward = 2 if level == 4 else (5 if level == 5 else 0)
-                if level >= 4 and (self.model.assistance_exploit.get(target_cell, 0) +
-                                   self.model.assistance_explor.get(target_cell, 0)) == 0:
+                if level >= 4 and (self.model.assistance_exploit.get(target_cell, 0) + self.model.assistance_explor.get(target_cell, 0)) == 0:
                     reward = 10
                 if level <= 2:
                     reward = -0.05 * accepted_count
@@ -496,8 +462,7 @@ class HumanAgent(Agent):
                 if source_id is not None and accepted_count > 0:
                     if self.agent_type == "exploitative":
                         confirmation_ratio = confirmations / accepted_count
-                        correction = 0.1 * (reward / (10 * accepted_count))
-                        Q_target = confirmation_ratio + correction
+                        Q_target = 2 * confirmation_ratio  # Strong reinforcement for confirmation.
                     else:
                         Q_target = reward / (10 * accepted_count)
                     old_Q = self.Q.get(source_id, self.trust.get(source_id, 0.5))
@@ -562,7 +527,7 @@ class AIAgent(Agent):
         self.sense_environment()
 
 #########################################
-# Main: Run Simulation and Output Visuals
+# Main: Run Simulation and Generate Outputs for Validation
 #########################################
 if __name__ == "__main__":
     share_exploitative = 0.5
@@ -579,49 +544,49 @@ if __name__ == "__main__":
     width = 50
     height = 50
 
+    # Run the simulation for a number of ticks.
+    ticks = 600
     model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
                           number_of_humans, share_confirming, disaster_dynamics, shock_probability, shock_magnitude,
                           trust_update_mode, exploitative_correction_factor, width, height)
-    ticks = 600
     for i in range(ticks):
         model.step()
 
-    # Define bin widths for histograms.
-    bin_width_correct = 50   # Now using bin size 50 for correct assistance
-    bin_width_incorrect = 50
-
-    # Visual 1: Histogram of tokens delivered to cells in need (by agent type).
+    # Visual 1: Histogram of tokens delivered to cells in need (level >= 4) by agent type.
     tokens_exploit = [model.assistance_exploit.get(pos, 0) for pos, level in model.disaster_grid.items() if level >= 4]
     tokens_explor = [model.assistance_explor.get(pos, 0) for pos, level in model.disaster_grid.items() if level >= 4]
     max_tokens = max(max(tokens_exploit, default=0), max(tokens_explor, default=0))
-    if max_tokens < bin_width_correct:
-        bins_correct = [0, bin_width_correct]
+    bin_width = 50
+    if max_tokens < bin_width:
+        bins_correct = [0, bin_width]
     else:
-        bins_correct = list(range(0, max_tokens + bin_width_correct, bin_width_correct))
+        bins_correct = list(range(0, max_tokens + bin_width, bin_width))
     plt.figure()
     plt.hist([tokens_exploit, tokens_explor],
              bins=bins_correct,
              label=["Exploitative", "Exploratory"],
-             color=["skyblue", "lightgreen"], edgecolor='black')
+             color=["skyblue", "lightgreen"],
+             edgecolor='black')
     plt.title("Histogram: Assistance Tokens Delivered\n(to Cells in Need, Level 4 or 5)")
     plt.xlabel("Total Tokens Delivered")
     plt.ylabel("Number of Cells")
     plt.legend()
     plt.show()
 
-    # Visual 2: Histogram of tokens incorrectly delivered (to cells with level 2 or lower) with larger bins.
+    # Visual 2: Histogram of tokens incorrectly delivered (cells with level <= 2).
     tokens_incorrect_exploit = [model.assistance_incorrect_exploit.get(pos, 0) for pos, level in model.disaster_grid.items() if level <= 2]
     tokens_incorrect_explor = [model.assistance_incorrect_explor.get(pos, 0) for pos, level in model.disaster_grid.items() if level <= 2]
     max_tokens_incorrect = max(max(tokens_incorrect_exploit, default=0), max(tokens_incorrect_explor, default=0))
-    if max_tokens_incorrect < bin_width_incorrect:
-        bins_incorrect = [0, bin_width_incorrect]
+    if max_tokens_incorrect < bin_width:
+        bins_incorrect = [0, bin_width]
     else:
-        bins_incorrect = list(range(0, max_tokens_incorrect + bin_width_incorrect, bin_width_incorrect))
+        bins_incorrect = list(range(0, max_tokens_incorrect + bin_width, bin_width))
     plt.figure()
     plt.hist([tokens_incorrect_exploit, tokens_incorrect_explor],
              bins=bins_incorrect,
              label=["Exploitative (Incorrect)", "Exploratory (Incorrect)"],
-             color=["coral", "orchid"], edgecolor='black')
+             color=["coral", "orchid"],
+             edgecolor='black')
     plt.title("Histogram: Incorrect Assistance Tokens Delivered\n(to Cells with Level 2 or Lower)")
     plt.xlabel("Total Tokens Delivered")
     plt.ylabel("Number of Cells")
@@ -654,7 +619,7 @@ if __name__ == "__main__":
     plt.show()
 
     # Visual 5: Information request calls by agent type.
-    calls_exp_human = [d[0]/5 for d in model.calls_data]
+    calls_exp_human = [d[0]/5 for d in model.calls_data]  # dividing by 5 for scaling, if needed.
     calls_exp_ai = [d[1] for d in model.calls_data]
     calls_expl_human = [d[2]/5 for d in model.calls_data]
     calls_expl_ai = [d[3] for d in model.calls_data]
