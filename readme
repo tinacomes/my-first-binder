@@ -1,0 +1,100 @@
+# DisasterModel: A Simulation of Relief, Trust, and Social Information Dynamics
+
+## Overview
+The **DisasterModel** is an agent-based model that simulates how human agents (with distinct behavioral types) and AI agents interact in a disaster scenario. The model represents a grid where each cell has a disaster "level" (ranging from 0 to 5) and agents (humans and AI) are positioned on this grid. Over time, the disaster level evolves due to baseline dynamics and shocks. Agents sense the environment, request information from others, and send relief tokens to grid cells in need.
+
+## Main Functionalities
+
+1. **Disaster Grid Initialization and Evolution:**  
+   - The grid is initialized with a disaster level based on the distance from a randomly chosen epicenter.  
+   - At each tick, the disaster level in each cell is updated towards a baseline value, with possible random shocks.
+
+2. **Agent Types:**
+   - **Human Agents:**  
+     - **Exploitative:** Prefer local, confirming information from nearby agents or trusted friends. They update their beliefs immediately.
+     - **Exploratory:** Seek information over a broader area and update their beliefs with a delay.
+     - Each human agent has beliefs about the disaster level on each grid cell, a trust metric for each information source, and a friend network.
+   - **AI Agents:**  
+     - Provide information to human agents about the disaster level. They can either "adapt" their outputs based on human beliefs or simply report their sensed values.
+
+3. **Information Exchange:**  
+   - Agents request information (from other humans or AI) using an ε–greedy strategy based on trust and information accuracy.
+   - Received reports are aggregated, and agents update their beliefs accordingly—either immediately (for exploitative agents) or after a delay (for exploratory agents).
+
+4. **Relief Actions:**  
+   - Based on their beliefs about where the need is greatest, agents send relief tokens to grid cells.
+   - Assistance is tracked separately for correct assistance (cells in need, level 4 or 5) and incorrect assistance (cells not in need, level 2 or lower).
+
+5. **Metrics and Analysis:**  
+   - The model tracks the evolution of trust, information request calls, and rewards.
+   - Additionally, it computes an **echo chamber metric** defined as the average absolute difference between an agent’s overall belief (averaged across the grid) and the average belief of its friends.
+
+## Echo Chamber Metric: Rationale and Construction
+
+**Construction:**  
+- For each human agent, compute the average belief (i.e., the average disaster level across all grid cells as perceived by that agent).  
+- Compute the average belief of the agent’s friends (the agents in its social network).  
+- The absolute difference between the agent’s average belief and the average of its friends is computed.  
+- Finally, the echo chamber metric is the mean of these differences across all agents.
+
+**Rationale:**  
+A low echo chamber metric indicates that agents’ beliefs are highly similar to those of their friends—an indication of strong filter bubbles or echo chambers. A higher value suggests greater diversity of opinions among connected agents, implying that information from outside sources is having more influence. This metric helps us study under what conditions (e.g., different agent attitudes, disaster dynamics, or AI behaviors) echo chambers emerge or break down.
+
+## Flowchart
+
+Below is a flowchart outlining the main execution steps of the DisasterModel:
+
+```mermaid
+flowchart TD
+    A[Start Simulation]
+    B[Initialize Disaster Grid]
+    C[Initialize Social Network and Agents]
+    D[For each Tick:]
+    E[Update Disaster Grid (Dynamics & Shocks)]
+    F[For each Agent: Sense Environment]
+    G[For each Agent: Request Information]
+    H[Aggregate and Update Beliefs]
+    I[For each Agent: Send Relief Tokens]
+    J[Process Relief Actions and Update Rewards]
+    K[Record Metrics (Trust, Calls, Rewards, Assistance)]
+    L[End Tick]
+    M[End Simulation]
+    
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+    J --> K
+    K --> L
+    L --> D
+    D -- If ticks complete --> M
+```
+
+## Usage
+
+- **Running the Model:**  
+  Run the main simulation script (e.g., using `python main_simulation.py`) to execute the DisasterModel.
+
+- **Experiments and Analysis:**  
+  Use the provided experiment scripts (e.g., `experiment_bandwidth.py` and `heatmap_visualization.py`) to study variability, filter bubbles, and spatial distribution of relief.
+
+- **Output Files:**  
+  For large-scale experiments, results are written to CSV files and later visualized to reduce memory usage.
+
+## Dependencies
+
+- Python 3.x
+- Mesa (Agent-based modeling framework)
+- NumPy
+- Matplotlib
+- NetworkX
+
+## License
+
+[Your preferred license here]
+
