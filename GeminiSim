@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+import random
+import math
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+
+from mesa import Agent, Model
+from mesa.space import MultiGrid
+from mesa.time import RandomActivation
+from DisasterModelNew import DisasterModel
+# ... (DisasterModel und Agenten-Definitionen aus dem vorherigen Code)
+
+def get_groups_from_friends(model):
+    """Leitet Gruppen aus den Freundschaftsbeziehungen ab."""
+    groups = {}
+    agent_to_group = {}
+    group_id = 0
+    for agent_id, agent in model.humans.items():
+        if agent_id not in agent_to_group:
+            group = set()
+            group.add(agent_id)
+            for friend_id in agent.friends:
+                group.add(friend_id)
+            groups[group_id] = group
+            for member in group:
+                agent_to_group[member] = group_id
+            group_id += 1
+    return {agent_id: agent_to_group[agent_id] for agent_id in model.humans}
+
+def calculate_gcs(model):
+    """Berechnet den Gruppen-Konsens-Score (GCS) basierend auf Freundschaften."""
+    groups = get_groups_from_friends(model)
+    gcs_values = []
+    for group_id in set(groups.values()):
+        group_agents = [agent for agent in model.humans.values() if groups[agent.unique_id] == group_id]
+        if not group_agents:
+            continue
+        group_beliefs = np.array([list(agent.beliefs.values()) for agent in group_agents])
+        avg_group_belief = np.mean(group_beliefs, axis=0)
+        group_deviation = np.mean(np.abs(group_beliefs - avg_group_belief), axis=1)
+        gcs_values.append(np.mean(group_deviation))
+    return np.mean(gcs_values) if gcs_values else 0
+
+def calculate_ai_trust_per_group(model):
+    """Berechnet das durchschnittliche KI-Vertrauen für jede Gruppe basierend auf Freundschaften."""
+    groups = get_groups_from_friends(model)
+    group_ai_trust = {}
+    for agent in model.humans.values():
+        group_id = groups[agent.unique_id]
+        ai_trust_values = [v for k, v in agent.trust.items() if k.startswith("A_")]
+        if ai_trust_values:
+            avg_ai_trust = np.mean(ai_trust_values)
+            if group_id not in group_ai_trust:
+                group_ai_trust[group_id] = []
+            group_ai_trust[group_id].append(avg_ai_trust)
+    return {group_id: np.mean(values) for group_id, values in group_ai_trust.items()}
+
+def run_simulation(share_exploitative, disaster_dynamics, ai_alignment_level):
+    """Führt die Simulation mit den angegebenen Parametern aus und gibt das Modell zurück."""
+    model = DisasterModel(share_exploitative=share_exploitative, share_of_disaster=0.2, initial_trust=0.5,
+                          initial_ai_trust=0.75, number_of_humans=50, share_confirming=0.5,
+                          disaster_dynamics=disaster_dynamics, shock_probability=0.1, shock_magnitude=2,
+                          trust_update_mode="average", exploitative_correction_factor=1.0, width=50, height=50,
+                          ai_alignment_level=ai_alignment_level)
+    gcs_evolution = []
+    ai_trust_evolution = []
+    correct_assistance = []
+    incorrect_assistance = []
+    human_assistance = []
+    ai_assistance = []
+    for _ in range(600):
+        model.step()
+        gcs_evolution.append(calculate_gcs(model))
+        ai_trust_evolution.append(calculate_ai_trust_per_group(model))
+        correct_assistance.append(sum(model.assistance_exploit.values()) + sum(model.assistance_explor.values()))
+        incorrect_assistance.append(sum(model.assistance_incorrect_exploit.values()) + sum(model.assistance_incorrect_explor.values()))
+        human_assistance.append(sum([agent.calls_human for agent in model.humans.values()]))
+        ai_assistance.append(sum([agent.calls_ai for agent in model.humans.values()]))
+
+    return model, gcs_evolution, ai_trust_evolution, correct_assistance, incorrect_assistance, human_assistance, ai_assistance
+
+# Szenarien
+scenarios = [
+    {"share_exploitative": 0.2, "disaster_dynamics": 2, "ai_alignment_level": 0.2, "label": "Hoher explorativer Anteil, normale Katastrophe, alignment niedrig"},
+    {"share_exploitative": 0.8, "disaster_dynamics": 4, "ai_alignment_level": 0.8, "label": "Hoher ausbeuterischer Anteil, dynamische Katastrophe, alignment hoch"},
+    {"share_exploitative": 0.5, "disaster_dynamics": 3, "ai_alignment_level": 0.5, "label": "Mittlerer Anteil, moderate Katastrophe, alignment mittel"},
+]
+
+# Ergebnisse speichern
+results = {}
+
+# Simulationen ausführen
+for scenario in scenarios:
+    results[scenario["label"]] = run_simulation(scenario["share_exploitative"], scenario["disaster_dynamics"], scenario["ai_alignment_level"])
+
+# Visualisierung
+plt.figure(figsize=(20, 15))
+
+for i, (label, (model, gcs, ai_trust, correct, incorrect, human_calls, ai_calls)) in enumerate(results.items()):
+    plt.subplot(3, 2, 1)
+    plt.plot(gcs, label=label)
+    plt.xlabel("Ticks")
+    plt.ylabel("Gruppen-Konsens-Score (GCS)")
+    plt.title("Evolution des menschlichen Echo-Kammer-Effekts")
+    plt.legend()
+
+    plt.subplot(3, 2, 2)
+    groups = get_groups_from_friends(model) # Korrektur: model verwenden
+    for group_id in set(groups.values()):
+        group_trust = [ai_trust[tick_data].get(group_id, 0) for tick_data in range(len(ai_trust))]
+        plt.plot(group_trust, label=f"{label} - Gruppe {group_id}")
+    plt.xlabel("Ticks")
+    plt.ylabel("Durchschnittliches KI-Vertrauen")
+    plt.title("Evolution des KI-Vertrauens pro Gruppe")
+    plt.legend()
+
+    plt.subplot(3, 2, 3)
+    plt.plot(correct, label=f"{label} - Korrekte Hilfe")
+    plt.plot(incorrect, label=f"{label} - Inkorrekte Hilfe")
+    plt.xlabel("Ticks")
+    plt.ylabel("Anzahl der Hilfeleistungen")
+    plt.title("Evolution der Hilfsleistungen")
+    plt.legend()
+
+    # Visualisierung des durchschnittlichen KI-Vertrauens über alle Gruppen
+    plt.subplot(3, 2, 4 + (i % 2))
+    avg_ai_trust_per_tick = [np.mean(list(tick_data.values())) if tick_data else 0 for tick_data in ai_trust]
+    plt.plot(avg_ai_trust_per_tick, label=label)
+    plt.xlabel("Ticks")
+    plt.ylabel("Durchschnittliches KI-Vertrauen (alle Gruppen)")
+    plt.title("Durchschnittliches KI-Vertrauen")
+    plt.legend()
+
+    plt.subplot(3, 2, 5)
+    plt.plot(human_calls, label=f"{label} - Menschliche Anfragen")
+    plt.plot(ai_calls, label=f"{label} - KI Anfragen")
+    plt.xlabel("Ticks")
+    plt.ylabel("Anzahl der Anfragen")
+    plt.title("Anzahl der Anfragen")
+    plt.legend()
+
+plt.tight_layout
