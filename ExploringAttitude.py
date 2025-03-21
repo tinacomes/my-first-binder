@@ -1,13 +1,43 @@
+#!/usr/bin/env python
+"""
+Optimized Batch Simulation Script
+
+This script runs each simulation run in a separate process (one at a time)
+and writes the final output metrics (e.g., echo chamber metrics and assistance metrics)
+to a CSV file immediately. This minimizes memory usage.
+
+It assumes that your updated DisasterModelNew (including HumanAgent and AIAgent)
+is available for import.
+"""
+
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
-import random
-import math
-import networkx as nx
+import random, math, networkx as nx
+import gc
+import multiprocessing as mp
 from mesa import Agent, Model
 from mesa.space import MultiGrid
 from mesa.time import RandomActivation
-from DisasterModelNew import DisasterModel
 
+# Import your model components (adjust the import path as needed)
+from DisasterModelNew import DisasterModel, HumanAgent
+
+############################################
+# Helper function: recursively flatten a nested list.
+############################################
+def flatten(lst):
+    flat = []
+    for item in lst:
+        if isinstance(item, list):
+            flat.extend(flatten(item))
+        else:
+            flat.append(item)
+    return flat
+
+############################################
+# Standard Metrics Functions
+############################################
 def compute_echo_chamber_metric(model):
     differences = []
     for agent in model.humans.values():
@@ -19,6 +49,27 @@ def compute_echo_chamber_metric(model):
                     friend_avgs.append(np.mean(list(model.humans[fid].beliefs.values())))
             if friend_avgs:
                 differences.append(abs(my_avg - np.mean(friend_avgs)))
+    return np.mean(differences) if differences else None
+
+def compute_ai_echo_chamber_metric(model):
+    differences = []
+    for agent in model.humans.values():
+        target_cells = set()
+        for entry in agent.pending_relief:
+            if len(entry) == 5:
+                target_cells.add(entry[4])
+        if target_cells and hasattr(agent, "ai_reported") and agent.ai_reported:
+            cell_diffs = []
+            for cell in target_cells:
+                if cell in agent.ai_reported and len(agent.ai_reported[cell]) > 0:
+                    rep_values = flatten(agent.ai_reported[cell])
+                    rep_values = [float(x) for x in rep_values]
+                    if rep_values:
+                        avg_ai = np.mean(rep_values)
+                        diff = abs(agent.beliefs[cell] - avg_ai)
+                        cell_diffs.append(diff)
+            if cell_diffs:
+                differences.append(np.mean(cell_diffs))
     return np.mean(differences) if differences else None
 
 def compute_assistance_metrics(model):
@@ -35,14 +86,25 @@ def compute_assistance_metrics(model):
                 assisted_incorrect += 1
     return assisted_in_need, assisted_incorrect
 
-def run_simulation(share_exploitative, num_ticks=100):
+############################################
+# Single Simulation Run Function
+############################################
+def run_single_simulation(params):
+    """
+    Run a single simulation with given parameters.
+    params: tuple (run_id, num_ticks, share_exploitative, share_confirming)
+    Returns a tuple with:
+       run_id, num_ticks, human_echo, ai_echo, assisted_in_need, assisted_incorrect,
+       share_exploitative, share_confirming.
+    """
+    run_id, num_ticks, share_exploitative, share_confirming = params
     model = DisasterModel(
-        share_exploitative=share_exploitative,  # e.g. 0.2 means 20% exploitative, 80% exploratory
+        share_exploitative=share_exploitative,
         share_of_disaster=0.2,
         initial_trust=0.5,
         initial_ai_trust=0.75,
         number_of_humans=50,
-        share_confirming=0.5,
+        share_confirming=share_confirming,
         disaster_dynamics=2,
         shock_probability=0.1,
         shock_magnitude=2,
@@ -53,87 +115,149 @@ def run_simulation(share_exploitative, num_ticks=100):
     )
     for t in range(num_ticks):
         model.step()
-    echo_metric = compute_echo_chamber_metric(model)
+    h_echo = compute_echo_chamber_metric(model)
+    ai_echo = compute_ai_echo_chamber_metric(model)
     assisted_in_need, assisted_incorrect = compute_assistance_metrics(model)
-    return echo_metric, assisted_in_need, assisted_incorrect
+    # Clean up model to free memory.
+    del model
+    gc.collect()
+    return (run_id, num_ticks, h_echo, ai_echo, assisted_in_need, assisted_incorrect, share_exploitative, share_confirming)
 
-# Use sorted parameter values for share_exploitative.
-share_exploitative_values = [0, 0.1, 0.33, 0.66]
-num_runs = 10
+############################################
+# Batch Processing Function
+############################################
+def run_batch_experiments(num_runs, num_ticks, param_values, param_name, fixed_params):
+    """
+    param_values: list of values for the parameter to vary.
+    param_name: string name, e.g., "share_exploitative" or "share_confirming"
+    fixed_params: dictionary of fixed parameters for the simulation.
+    Writes one CSV file per param value.
+    """
+    for val in param_values:
+        output_filename = f"experiment_{param_name}_{val}.csv"
+        with open(output_filename, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            header = ["run", "tick", "h_echo", "ai_echo", "need", "incorrect", param_name]
+            writer.writerow(header)
+            params = []
+            for run in range(num_runs):
+                # Combine fixed parameters and the varying parameter.
+                if param_name == "share_exploitative":
+                    sp = val
+                    sc = fixed_params.get("share_confirming", 0.5)
+                else:
+                    sp = fixed_params.get("share_exploitative", 0.5)
+                    sc = val
+                params.append((run, num_ticks, sp, sc))
+            # Use a pool with one process to run sequentially.
+            with mp.Pool(processes=1) as pool:
+                for res in pool.imap_unordered(run_single_simulation, params):
+                    writer.writerow(res)
+                    gc.collect()
+        print(f"Completed batch for {param_name} = {val}")
 
-# Dictionaries to store lists of metrics for each parameter value.
-echo_metrics_by_param = {}
-need_metrics_by_param = {}
-incorrect_metrics_by_param = {}
+############################################
+# Aggregation Function
+############################################
+def aggregate_experiment(filenames, param_name):
+    all_data = []
+    for fname in filenames:
+        data = np.genfromtxt(fname, delimiter=",", skip_header=1)
+        all_data.append(data)
+    all_data = np.concatenate(all_data, axis=0)
+    # Group data by the parameter.
+    groups = {}
+    for row in all_data:
+        key = row[-1]
+        groups.setdefault(key, []).append(row)
+    # Convert each group's list to numpy array.
+    for key in groups:
+        groups[key] = np.array(groups[key])
+    return groups
 
-for se in share_exploitative_values:
-    echo_list = []
-    need_list = []
-    incorrect_list = []
-    for run in range(num_runs):
-        echo, need, incorrect = run_simulation(se)
-        echo_list.append(echo)
-        need_list.append(need)
-        incorrect_list.append(incorrect)
-    echo_metrics_by_param[se] = echo_list
-    need_metrics_by_param[se] = need_list
-    incorrect_metrics_by_param[se] = incorrect_list
-
-# Helper function to compute mean, 25th, and 75th percentiles.
 def compute_stats(data_list):
-    data = np.array(data_list)
+    data = np.array(data_list, dtype=float)
     mean = np.mean(data)
     p25 = np.percentile(data, 25)
     p75 = np.percentile(data, 75)
-    return mean, p25, p75
+    return mean, abs(mean - p25), abs(p75 - mean)
 
-# Prepare data for errorbar plotting.
-x = share_exploitative_values
+def prepare_plot_data(grouped, key_index):
+    # key_index: column index for metric (2: h_echo, 3: ai_echo, 4: need, 5: incorrect)
+    means = []
+    lowers = []
+    uppers = []
+    param_keys = sorted(grouped.keys())
+    for k in param_keys:
+        col_data = grouped[k][:, key_index]
+        mean, err_low, err_high = compute_stats(col_data)
+        means.append(mean)
+        lowers.append(err_low)
+        uppers.append(err_high)
+    return param_keys, means, lowers, uppers
 
-echo_means = []
-echo_err_lower = []
-echo_err_upper = []
-need_means = []
-need_err_lower = []
-need_err_upper = []
-incorrect_means = []
-incorrect_err_lower = []
-incorrect_err_upper = []
-
-for se in x:
-    mean, p25, p75 = compute_stats(echo_metrics_by_param[se])
-    echo_means.append(mean)
-    echo_err_lower.append(mean - p25)
-    echo_err_upper.append(p75 - mean)
+############################################
+# Main Execution for Scripts A-D
+############################################
+if __name__ == "__main__":
+    num_runs = 10
+    num_ticks = 200
     
-    mean, p25, p75 = compute_stats(need_metrics_by_param[se])
-    need_means.append(mean)
-    need_err_lower.append(mean - p25)
-    need_err_upper.append(p75 - mean)
+    # Script A: Vary share_confirming while keeping share_exploitative fixed.
+    share_confirming_values = [0.2, 0.5, 0.8]
+    fixed_params_A = {"share_exploitative": 0.5}
+    filenames_A = []
+    for sc in share_confirming_values:
+        fname = f"experiment_share_confirming_{sc}.csv"
+        run_batch_experiments(num_runs, num_ticks, [sc], "share_confirming", fixed_params_A)
+        filenames_A.append(fname)
     
-    mean, p25, p75 = compute_stats(incorrect_metrics_by_param[se])
-    incorrect_means.append(mean)
-    incorrect_err_lower.append(mean - p25)
-    incorrect_err_upper.append(p75 - mean)
-
-plt.figure(figsize=(14,4))
-plt.subplot(1,3,1)
-plt.errorbar(x, echo_means, yerr=[echo_err_lower, echo_err_upper], fmt='o-', capsize=5)
-plt.xlabel("Share Exploitative")
-plt.ylabel("Echo Chamber Metric")
-plt.title("Echo Chamber vs. Share Exploitative")
-
-plt.subplot(1,3,2)
-plt.errorbar(x, need_means, yerr=[need_err_lower, need_err_upper], fmt='o-', capsize=5, color='green')
-plt.xlabel("Share Exploitative")
-plt.ylabel("Cells in Need Assisted")
-plt.title("Assistance in Need vs. Share Exploitative")
-
-plt.subplot(1,3,3)
-plt.errorbar(x, incorrect_means, yerr=[incorrect_err_lower, incorrect_err_upper], fmt='o-', capsize=5, color='red')
-plt.xlabel("Share Exploitative")
-plt.ylabel("Incorrect Assistance")
-plt.title("Incorrect Assistance vs. Share Exploitative")
-
-plt.tight_layout()
-plt.show()
+    # Script B: Vary shock_magnitude (for example) with fixed disaster_dynamics.
+    # (Omitted here for brevity; similar structure as above.)
+    
+    # Script C: Vary share_exploitative while keeping share_confirming fixed.
+    share_exploitative_values = [0.2, 0.5, 0.8]
+    fixed_params_C = {"share_confirming": 0.5}
+    filenames_C = []
+    for sp in share_exploitative_values:
+        fname = f"experiment_share_exploitative_{sp}.csv"
+        run_batch_experiments(num_runs, num_ticks, [sp], "share_exploitative", fixed_params_C)
+        filenames_C.append(fname)
+    
+    # Script D: Vary AI adaptation (if supported by your model).
+    # (Omitted here for brevity.)
+    
+    # Aggregation and plotting for Script A (as an example)
+    grouped_A = aggregate_experiment(filenames_A, "share_confirming")
+    param_keys_A, h_echo_means_A, h_echo_lower_A, h_echo_upper_A = prepare_plot_data(grouped_A, 2)
+    param_keys_A, ai_echo_means_A, ai_echo_lower_A, ai_echo_upper_A = prepare_plot_data(grouped_A, 3)
+    param_keys_A, need_means_A, need_lower_A, need_upper_A = prepare_plot_data(grouped_A, 4)
+    param_keys_A, incorrect_means_A, incorrect_lower_A, incorrect_upper_A = prepare_plot_data(grouped_A, 5)
+    
+    plt.figure(figsize=(16,4))
+    plt.subplot(1,4,1)
+    plt.errorbar(param_keys_A, h_echo_means_A, yerr=[h_echo_lower_A, h_echo_upper_A], fmt='o-', capsize=5)
+    plt.xlabel("Share Confirming")
+    plt.ylabel("Human Echo Chamber Metric")
+    plt.title("Human Echo vs. Share Confirming")
+    
+    plt.subplot(1,4,2)
+    plt.errorbar(param_keys_A, ai_echo_means_A, yerr=[ai_echo_lower_A, ai_echo_upper_A], fmt='o-', capsize=5, color='orange')
+    plt.xlabel("Share Confirming")
+    plt.ylabel("AI Echo Chamber Metric")
+    plt.title("AI Echo vs. Share Confirming")
+    
+    plt.subplot(1,4,3)
+    plt.errorbar(param_keys_A, need_means_A, yerr=[need_lower_A, need_upper_A], fmt='o-', capsize=5, color='green')
+    plt.xlabel("Share Confirming")
+    plt.ylabel("Cells in Need Assisted")
+    plt.title("Assistance in Need vs. Share Confirming")
+    
+    plt.subplot(1,4,4)
+    plt.errorbar(param_keys_A, incorrect_means_A, yerr=[incorrect_lower_A, incorrect_upper_A], fmt='o-', capsize=5, color='red')
+    plt.xlabel("Share Confirming")
+    plt.ylabel("Incorrect Assistance")
+    plt.title("Incorrect Assistance vs. Share Confirming")
+    
+    plt.tight_layout()
+    plt.show()
