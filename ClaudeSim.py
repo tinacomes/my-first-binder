@@ -9,6 +9,8 @@ from tqdm import tqdm
 import multiprocessing as mp
 import itertools
 import os
+import gc
+import time
 from copy import deepcopy
 
 # Import your model classes
@@ -16,6 +18,7 @@ from DisasterModelNew import DisasterModel, HumanAgent, AIAgent
 
 # Ensure output directory exists
 os.makedirs("simulation_outputs", exist_ok=True)
+os.makedirs("simulation_outputs/temp_results", exist_ok=True)
 
 # Define experiment configurations
 def run_experiments():
@@ -51,35 +54,59 @@ def run_experiments():
         experiment_params['initial_ai_trust']
     ))
     
-    # Run experiments in parallel
-    num_processes = min(mp.cpu_count(), len(param_combinations))
-    print(f"Running {len(param_combinations)} experiments with {num_processes} parallel processes")
+    # Process in smaller batches to manage memory
+    batch_size = 5  # Adjust this based on your system capabilities
+    num_batches = (len(param_combinations) + batch_size - 1) // batch_size
     
-    # Split combinations for parallel processing
-    chunks = np.array_split(param_combinations, num_processes)
+    print(f"Running {len(param_combinations)} experiments in {num_batches} batches")
     
-    with mp.Pool(processes=num_processes) as pool:
-        results = pool.map(process_chunk, [(chunk, fixed_params, experiment_params) for chunk in chunks])
+    # Create a temporary file to track completion
+    with open("simulation_outputs/experiment_progress.txt", "w") as f:
+        f.write(f"0/{len(param_combinations)} complete\n")
     
-    # Combine results from all processes
-    all_results = []
-    for r in results:
-        all_results.extend(r)
+    # Process batches
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, len(param_combinations))
+        batch = param_combinations[start_idx:end_idx]
+        
+        print(f"Processing batch {i+1}/{num_batches} ({len(batch)} parameter combinations)")
+        
+        # Run batch in parallel
+        num_processes = min(mp.cpu_count(), len(batch))
+        chunks = np.array_split(batch, num_processes)
+        
+        with mp.Pool(processes=num_processes) as pool:
+            pool.map(process_chunk, [(chunk_idx, chunk, fixed_params, experiment_params) 
+                                    for chunk_idx, chunk in enumerate(chunks)])
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Update progress
+        total_processed = end_idx
+        with open("simulation_outputs/experiment_progress.txt", "w") as f:
+            f.write(f"{total_processed}/{len(param_combinations)} complete\n")
     
-    # Convert to DataFrame for analysis
-    results_df = pd.DataFrame(all_results)
-    
-    # Save the raw results
-    results_df.to_csv("simulation_outputs/experiment_results.csv", index=False)
+    # Combine all results files
+    combine_result_files()
     
     # Generate analysis and visualizations
+    results_df = pd.read_csv("simulation_outputs/experiment_results.csv")
     analyze_results(results_df, experiment_params)
+    
+    # Clean up temporary files
+    for file in os.listdir("simulation_outputs/temp_results"):
+        os.remove(os.path.join("simulation_outputs/temp_results", file))
 
 def process_chunk(args):
-    chunk, fixed_params, param_names = args
-    results = []
+    chunk_idx, chunk, fixed_params, param_names = args
     
-    for params in chunk:
+    # Create a temp filename for this chunk's results
+    temp_filename = f"simulation_outputs/temp_results/chunk_{chunk_idx}_{int(time.time())}.csv"
+    
+    # Process each parameter combination
+    for param_idx, params in enumerate(chunk):
         # Create parameter dictionary for this run
         run_params = {
             'share_exploitative': params[0],
@@ -92,9 +119,40 @@ def process_chunk(args):
         
         # Run single experiment
         result = run_single_experiment(run_params)
-        results.append(result)
+        
+        # Convert to DataFrame
+        result_df = pd.DataFrame([result])
+        
+        # Write to temp file (append mode if not the first result)
+        mode = 'a' if param_idx > 0 else 'w'
+        header = not (param_idx > 0)
+        result_df.to_csv(temp_filename, index=False, mode=mode, header=header)
+        
+        # Free memory
+        del result
+        del result_df
+        gc.collect()
+
+def combine_result_files():
+    """Combine all temporary result files into a single CSV"""
+    all_dfs = []
+    temp_dir = "simulation_outputs/temp_results"
     
-    return results
+    for filename in os.listdir(temp_dir):
+        if filename.endswith(".csv"):
+            file_path = os.path.join(temp_dir, filename)
+            df = pd.read_csv(file_path)
+            all_dfs.append(df)
+    
+    # Combine and save
+    if all_dfs:
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        combined_df.to_csv("simulation_outputs/experiment_results.csv", index=False)
+        
+        # Free memory
+        del all_dfs
+        del combined_df
+        gc.collect()
 
 def run_single_experiment(params):
     # Extract parameters for this run
@@ -123,6 +181,9 @@ def run_single_experiment(params):
         'initial_ai_trust': params['initial_ai_trust'],
         **metrics
     }
+    
+    # Free up memory
+    del model
     
     return result
 
@@ -215,50 +276,68 @@ def analyze_results(results_df, experiment_params):
     plot_dir = "simulation_outputs/plots"
     os.makedirs(plot_dir, exist_ok=True)
     
+    # Process in batches to save memory
+    metrics_to_plot = [
+        'human_echo_chamber', 'assistance_coverage', 
+        'incorrect_assistance_rate', 'avg_unmet_needs',
+        'human_ai_echo_chamber', 'avg_exp_ai_trust', 
+        'avg_expl_ai_trust'
+    ]
+    
     # 1. Impact of share_exploitative on key metrics
-    explore_plot_key_metrics(results_df, 'share_exploitative', 
-                        ['human_echo_chamber', 'assistance_coverage', 'incorrect_assistance_rate', 'avg_unmet_needs'],
-                        "Impact of Exploitative/Exploratory Ratio",
-                        plot_dir)
+    for metric in metrics_to_plot:
+        create_boxplot(results_df, 'share_exploitative', metric, 
+                      f"Impact of Exploitative/Exploratory Ratio on {metric}", 
+                      plot_dir)
+        # Free memory
+        gc.collect()
     
     # 2. Impact of ai_alignment_level on key metrics
-    explore_plot_key_metrics(results_df, 'ai_alignment_level', 
-                        ['human_ai_echo_chamber', 'assistance_coverage', 'avg_exp_ai_trust', 'avg_expl_ai_trust'],
-                        "Impact of AI Alignment Level",
-                        plot_dir)
+    for metric in metrics_to_plot:
+        create_boxplot(results_df, 'ai_alignment_level', metric, 
+                      f"Impact of AI Alignment Level on {metric}", 
+                      plot_dir)
+        # Free memory
+        gc.collect()
     
     # 3. Impact of disaster_dynamics on key metrics
-    explore_plot_key_metrics(results_df, 'disaster_dynamics', 
-                        ['assistance_coverage', 'incorrect_assistance_rate', 'avg_unmet_needs'],
-                        "Impact of Disaster Dynamics",
-                        plot_dir)
+    for metric in ['assistance_coverage', 'incorrect_assistance_rate', 'avg_unmet_needs']:
+        create_boxplot(results_df, 'disaster_dynamics', metric, 
+                      f"Impact of Disaster Dynamics on {metric}", 
+                      plot_dir)
+        # Free memory
+        gc.collect()
     
     # 4. Impact of share_of_disaster on key metrics
-    explore_plot_key_metrics(results_df, 'share_of_disaster', 
-                        ['assistance_coverage', 'incorrect_assistance_rate', 'avg_unmet_needs'],
-                        "Impact of Disaster Coverage",
-                        plot_dir)
+    for metric in ['assistance_coverage', 'incorrect_assistance_rate', 'avg_unmet_needs']:
+        create_boxplot(results_df, 'share_of_disaster', metric, 
+                      f"Impact of Disaster Coverage on {metric}", 
+                      plot_dir)
+        # Free memory
+        gc.collect()
     
-    # 5. Compare human vs AI trust across agent types (exploitative vs exploratory)
+    # 5. Compare human vs AI trust across agent types (smaller chunks)
     plot_trust_comparison(results_df, plot_dir)
+    gc.collect()
     
-    # 6. Heatmap of key interactions (e.g., ai_alignment_level vs share_exploitative)
+    # 6. Heatmap of key interactions
     for metric in ['assistance_coverage', 'human_ai_echo_chamber']:
         plot_interaction_heatmap(results_df, 'ai_alignment_level', 'share_exploitative', 
                               metric, plot_dir, f"{metric}_heatmap")
+        gc.collect()
     
     # 7. Plot call ratios (human vs AI) for different agent types
     plot_call_ratios(results_df, plot_dir)
+    gc.collect()
 
-def explore_plot_key_metrics(df, param_name, metrics, title, plot_dir):
-    """Create box plots for key metrics by parameter variations"""
-    for metric in metrics:
-        plt.figure(figsize=(10, 6))
-        sns.boxplot(x=param_name, y=metric, data=df)
-        plt.title(f"{title} on {metric}")
-        plt.tight_layout()
-        plt.savefig(f"{plot_dir}/{param_name}_{metric}_boxplot.png")
-        plt.close()
+def create_boxplot(df, x_param, y_param, title, plot_dir):
+    """Create a single boxplot and free memory"""
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(x=x_param, y=y_param, data=df)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(f"{plot_dir}/{x_param}_{y_param}_boxplot.png")
+    plt.close()
 
 def plot_interaction_heatmap(df, x_param, y_param, metric, plot_dir, filename):
     """Create heatmap showing interaction effects between two parameters"""
@@ -272,6 +351,10 @@ def plot_interaction_heatmap(df, x_param, y_param, metric, plot_dir, filename):
     plt.tight_layout()
     plt.savefig(f"{plot_dir}/{filename}.png")
     plt.close()
+    
+    # Free memory
+    del pivot_data
+    del pivot_table
 
 def plot_trust_comparison(df, plot_dir):
     """Plot comparison of trust levels across agent types and trust targets"""
@@ -299,6 +382,9 @@ def plot_trust_comparison(df, plot_dir):
     plt.tight_layout()
     plt.savefig(f"{plot_dir}/trust_by_ai_alignment.png")
     plt.close()
+    
+    # Free memory
+    del trust_data
 
 def plot_call_ratios(df, plot_dir):
     """Plot call ratios (human:AI) for different agent types"""
@@ -333,6 +419,9 @@ def plot_call_ratios(df, plot_dir):
     plt.tight_layout()
     plt.savefig(f"{plot_dir}/call_ratio_by_ai_alignment.png")
     plt.close()
+    
+    # Free memory
+    del call_data
 
 # Function to run a time-series experiment for a specific configuration
 def run_time_series_experiment(config_name, params):
@@ -345,49 +434,45 @@ def run_time_series_experiment(config_name, params):
     model = DisasterModel(**params)
     model.ai_alignment_level = ai_alignment_level
     
-    # Prepare data structures for time series
-    time_series = {
-        'tick': [],
-        'exp_human_trust': [],
-        'exp_ai_trust': [],
-        'expl_human_trust': [],
-        'expl_ai_trust': [],
-        'calls_exp_human': [],
-        'calls_exp_ai': [],
-        'calls_expl_human': [],
-        'calls_expl_ai': [],
-        'unmet_needs': [],
-        'human_echo_chamber': [],
-        'human_ai_echo_chamber': []
-    }
-    
-    # Run simulation and collect time series data
-    for i in range(ticks):
-        model.step()
-        
-        # Record data at each tick
-        time_series['tick'].append(i)
-        time_series['exp_human_trust'].append(model.trust_data[-1][0])
-        time_series['exp_ai_trust'].append(model.trust_data[-1][1])
-        time_series['expl_human_trust'].append(model.trust_data[-1][2])
-        time_series['expl_ai_trust'].append(model.trust_data[-1][3])
-        time_series['calls_exp_human'].append(model.calls_data[-1][0])
-        time_series['calls_exp_ai'].append(model.calls_data[-1][1])
-        time_series['calls_expl_human'].append(model.calls_data[-1][2])
-        time_series['calls_expl_ai'].append(model.calls_data[-1][3])
-        time_series['unmet_needs'].append(model.unmet_needs_evolution[-1])
-        time_series['human_echo_chamber'].append(calculate_belief_variance(model, "human_only"))
-        time_series['human_ai_echo_chamber'].append(calculate_belief_variance(model, "human_ai"))
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(time_series)
-    
-    # Save to CSV
+    # Create output directory
     os.makedirs("simulation_outputs/time_series", exist_ok=True)
-    df.to_csv(f"simulation_outputs/time_series/{config_name}.csv", index=False)
+    output_file = f"simulation_outputs/time_series/{config_name}.csv"
+    
+    # Open file for writing
+    with open(output_file, 'w') as f:
+        # Write header
+        header = "tick,exp_human_trust,exp_ai_trust,expl_human_trust,expl_ai_trust,"
+        header += "calls_exp_human,calls_exp_ai,calls_expl_human,calls_expl_ai,"
+        header += "unmet_needs,human_echo_chamber,human_ai_echo_chamber\n"
+        f.write(header)
+        
+        # Run simulation and collect time series data
+        for i in range(ticks):
+            model.step()
+            
+            # Calculate metrics at this tick
+            human_echo = calculate_belief_variance(model, "human_only")
+            human_ai_echo = calculate_belief_variance(model, "human_ai")
+            
+            # Format row data
+            row = f"{i},{model.trust_data[-1][0]},{model.trust_data[-1][1]},"
+            row += f"{model.trust_data[-1][2]},{model.trust_data[-1][3]},"
+            row += f"{model.calls_data[-1][0]},{model.calls_data[-1][1]},"
+            row += f"{model.calls_data[-1][2]},{model.calls_data[-1][3]},"
+            row += f"{model.unmet_needs_evolution[-1]},{human_echo},{human_ai_echo}\n"
+            
+            # Write row
+            f.write(row)
+    
+    # Read file back for plotting
+    df = pd.read_csv(output_file)
     
     # Create key plots
     plot_time_series(df, config_name)
+    
+    # Free memory
+    del model
+    gc.collect()
     
     return df
 
@@ -408,6 +493,7 @@ def plot_time_series(df, config_name):
     plt.legend()
     plt.savefig(f"{plot_dir}/{config_name}_trust_evolution.png")
     plt.close()
+    gc.collect()
     
     # 2. Information calls
     plt.figure(figsize=(12, 8))
@@ -421,6 +507,7 @@ def plot_time_series(df, config_name):
     plt.legend()
     plt.savefig(f"{plot_dir}/{config_name}_calls_evolution.png")
     plt.close()
+    gc.collect()
     
     # 3. Unmet needs
     plt.figure(figsize=(12, 8))
@@ -430,6 +517,7 @@ def plot_time_series(df, config_name):
     plt.ylabel("Unassisted Cells (Level ≥ 4)")
     plt.savefig(f"{plot_dir}/{config_name}_unmet_needs.png")
     plt.close()
+    gc.collect()
     
     # 4. Echo chamber effects
     plt.figure(figsize=(12, 8))
@@ -441,6 +529,7 @@ def plot_time_series(df, config_name):
     plt.legend()
     plt.savefig(f"{plot_dir}/{config_name}_echo_chambers.png")
     plt.close()
+    gc.collect()
 
 def run_key_time_series_experiments():
     """Run a set of time series experiments for key configurations"""
@@ -511,75 +600,54 @@ def run_key_time_series_experiments():
         }
     }
     
-    # Run each scenario and collect results
-    time_series_results = {}
+    # Run each scenario one at a time to preserve memory
     for name, scenario_params in scenarios.items():
         print(f"Running time series experiment: {name}")
         params = {**base_params, **scenario_params}
-        time_series_results[name] = run_time_series_experiment(name, params)
+        run_time_series_experiment(name, params)
+        gc.collect()
     
-    # Create comparative plots
-    create_comparative_plots(time_series_results)
+    # Create comparative plots by loading data from files
+    create_comparative_plots()
 
-def create_comparative_plots(results_dict):
-    """Create plots comparing different scenarios"""
+def create_comparative_plots():
+    """Create plots comparing different scenarios by loading data from files"""
     plot_dir = "simulation_outputs/time_series/comparative"
     os.makedirs(plot_dir, exist_ok=True)
     
-    # Compare trust in AI across scenarios
-    plt.figure(figsize=(12, 8))
-    for name, df in results_dict.items():
-        plt.plot(df['tick'], df['exp_ai_trust'], label=f"{name} - Exploitative")
-    plt.xlabel("Tick")
-    plt.ylabel("Average Trust in AI")
-    plt.title("Trust in AI by Exploitative Agents Across Scenarios")
-    plt.legend()
-    plt.savefig(f"{plot_dir}/comparative_exp_ai_trust.png")
-    plt.close()
+    # Get scenario names from saved files
+    time_series_dir = "simulation_outputs/time_series"
+    scenario_files = [f for f in os.listdir(time_series_dir) if f.endswith(".csv")]
+    scenario_names = [os.path.splitext(f)[0] for f in scenario_files]
     
-    # Compare trust in AI by exploratory agents
-    plt.figure(figsize=(12, 8))
-    for name, df in results_dict.items():
-        plt.plot(df['tick'], df['expl_ai_trust'], label=f"{name} - Exploratory")
-    plt.xlabel("Tick")
-    plt.ylabel("Average Trust in AI")
-    plt.title("Trust in AI by Exploratory Agents Across Scenarios")
-    plt.legend()
-    plt.savefig(f"{plot_dir}/comparative_expl_ai_trust.png")
-    plt.close()
+    # Create comparison plots for different metrics
+    metrics_to_compare = [
+        ('exp_ai_trust', "Trust in AI by Exploitative Agents"),
+        ('expl_ai_trust', "Trust in AI by Exploratory Agents"),
+        ('unmet_needs', "Unmet Needs"),
+        ('human_echo_chamber', "Human Echo Chamber Effects"),
+        ('human_ai_echo_chamber', "Human-AI Echo Chamber Effects")
+    ]
     
-    # Compare unmet needs
-    plt.figure(figsize=(12, 8))
-    for name, df in results_dict.items():
-        plt.plot(df['tick'], df['unmet_needs'], label=name)
-    plt.xlabel("Tick")
-    plt.ylabel("Unmet Needs")
-    plt.title("Unmet Needs Across Scenarios")
-    plt.legend()
-    plt.savefig(f"{plot_dir}/comparative_unmet_needs.png")
-    plt.close()
-    
-    # Compare human echo chamber effects
-    plt.figure(figsize=(12, 8))
-    for name, df in results_dict.items():
-        plt.plot(df['tick'], df['human_echo_chamber'], label=name)
-    plt.xlabel("Tick")
-    plt.ylabel("Belief Variance")
-    plt.title("Human Echo Chamber Effects Across Scenarios")
-    plt.legend()
-    plt.savefig(f"{plot_dir}/comparative_human_echo_chamber.png")
-    plt.close()
-    
-    # Compare human-AI echo chamber effects
-    plt.figure(figsize=(12, 8))
-    for name, df in results_dict.items():
-        plt.plot(df['tick'], df['human_ai_echo_chamber'], label=name)
-    plt.xlabel("Tick")
-    plt.ylabel("Belief Variance")
-    plt.title("Human-AI Echo Chamber Effects Across Scenarios")
-    plt.legend()
-    plt.savefig(f"{plot_dir}/comparative_human_ai_echo_chamber.png")
-    plt.close()
+    for metric, title in metrics_to_compare:
+        plt.figure(figsize=(12, 8))
+        
+        for name in scenario_names:
+            # Load data for this scenario
+            df = pd.read_csv(f"{time_series_dir}/{name}.csv")
+            plt.plot(df['tick'], df[metric], label=name)
+            
+            # Free memory
+            del df
+            gc.collect()
+        
+        plt.xlabel("Tick")
+        plt.ylabel(metric.replace('_', ' ').title())
+        plt.title(f"{title} Across Scenarios")
+        plt.legend()
+        plt.savefig(f"{plot_dir}/comparative_{metric}.png")
+        plt.close()
+        gc.collect()
 
 if __name__ == "__main__":
     # Run parameter sweep experiments
