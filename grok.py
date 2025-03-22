@@ -55,6 +55,8 @@ class DisasterModel(Model):
         self.assistance_incorrect_explor = {}
         self.unmet_needs_evolution = []
 
+        
+
         # Disaster Grid as numpy arrays
         self.disaster_grid = np.zeros((width, height), dtype=int)
         self.baseline_grid = np.zeros((width, height), dtype=int)
@@ -85,6 +87,8 @@ class DisasterModel(Model):
             self.grid.place_agent(a, (x, y))
 
         # Initialize trust and info_accuracy for each human.
+        self.network_trust_data = []  # (tick, avg_trust_in_friends, avg_trust_outside)
+        
         for i in range(self.num_humans):
             agent_id = f"H_{i}"
             agent = self.humans[agent_id]
@@ -134,10 +138,12 @@ class DisasterModel(Model):
         self.disaster_grid = np.clip(self.disaster_grid + change + shocks, 0, 5)
 
     def step(self):
-        self.tokens_this_tick = {}  # Reset tokens this tick.
+   
+  
+        self.tokens_this_tick = {}
         self.update_disaster()
         self.schedule.step()
-        # Compute unmet needs: count cells with level>=4 that got no token use NumPy.
+
         need_mask = self.disaster_grid >= 4
         height, width = self.disaster_grid.shape
         token_array = np.zeros((height, width), dtype=int)
@@ -146,8 +152,7 @@ class DisasterModel(Model):
             token_array[x, y] = count
         unmet = np.sum(need_mask & (token_array == 0))
         self.unmet_needs_evolution.append(unmet)
-    
-    # Initialize reward tracking variables
+
         total_reward_exploit = 0
         total_reward_explor = 0
         for agent in self.humans.values():
@@ -157,15 +162,21 @@ class DisasterModel(Model):
             else:
                 total_reward_explor += agent.total_reward
 
-        # Initialize all trust lists
+        called_sources = set()
         exp_human_trust = []
         exp_ai_trust = []
         expl_human_trust = []
         expl_ai_trust = []
         calls_exp_human = calls_exp_ai = calls_expl_human = calls_expl_ai = 0
+        exp_trust_in = []
+        exp_trust_out = []
+        expl_trust_in = []
+        expl_trust_out = []
         for agent in self.humans.values():
             human_vals = [v for key, v in agent.trust.items() if key.startswith("H_")]
             ai_vals = [v for key, v in agent.trust.items() if key.startswith("A_")]
+            trust_in = [agent.trust[f] for f in agent.friends if f in agent.trust]
+            trust_out = [agent.trust[h] for h in agent.trust if h.startswith("H_") and h not in agent.friends]
             if agent.agent_type == "exploitative":
                 if human_vals:
                     exp_human_trust.append(np.mean(human_vals))
@@ -173,6 +184,8 @@ class DisasterModel(Model):
                     exp_ai_trust.append(np.mean(ai_vals))
                 calls_exp_human += agent.calls_human
                 calls_exp_ai += agent.calls_ai
+                exp_trust_in.append(np.mean(trust_in) if trust_in else 0)
+                exp_trust_out.append(np.mean(trust_out) if trust_out else 0)
             else:
                 if human_vals:
                     expl_human_trust.append(np.mean(human_vals))
@@ -180,9 +193,33 @@ class DisasterModel(Model):
                     expl_ai_trust.append(np.mean(ai_vals))
                 calls_expl_human += agent.calls_human
                 calls_expl_ai += agent.calls_ai
+                expl_trust_in.append(np.mean(trust_in) if trust_in else 0)
+                expl_trust_out.append(np.mean(trust_out) if trust_out else 0)
+            for entry in agent.pending_relief:
+                if len(entry) >= 2 and entry[1] is not None:
+                    called_sources.add(entry[1])
             agent.calls_human = 0
             agent.calls_ai = 0
             agent.total_reward = 0
+
+        self.network_trust_data.append((
+            self.tick,
+            np.mean(exp_trust_in),
+            np.mean(exp_trust_out),
+            np.mean(expl_trust_in),
+            np.mean(expl_trust_out)
+        ))
+
+        # Adjusted trust decay for divergence
+        for agent in self.humans.values():
+            for source in agent.trust:
+                if source not in called_sources:
+                    if agent.agent_type == "exploitative":
+                        decay = 0.001 if (source.startswith("H_") and source in agent.friends) else \
+                                0.025 if source.startswith("H_") else 0.02  # Increased for non-friends and AI
+                    else:
+                        decay = 0.01  # Slightly increased for exploratory
+                    agent.trust[source] = max(0, agent.trust[source] - decay)
 
         avg_exp_human_trust = np.mean(exp_human_trust) if exp_human_trust else 0
         avg_exp_ai_trust = np.mean(exp_ai_trust) if exp_ai_trust else 0
@@ -198,39 +235,39 @@ class DisasterModel(Model):
 # Agent Definitions
 #########################################
 class HumanAgent(Agent):
-    def __init__(self, unique_id, model, id_num, agent_type="exploitative", share_confirming=0.5):
+    def __init__(self, unique_id, model, id_num, agent_type, share_confirming):
         super().__init__(model)
         self.unique_id = unique_id
-        self.id_num = id_num
         self.model = model
+        self.id_num = id_num
+        self.pos = None
         self.agent_type = agent_type
-        # Attitude parameters.
-        if random.random() < share_confirming:
-            self.attitude_type = "confirming"
-            self.D = 0.3
-            self.delta = 20
-            self.epsilon = 5
-        else:
-            self.attitude_type = "other"
-            self.D = 0.9
+        self.share_confirming = share_confirming
+        # Determine if this agent is confirming (only for exploitative)
+        self.is_confirming = (agent_type == "exploitative" and random.random() < share_confirming)
+        # Set D and delta based on confirming status
+        if self.is_confirming:
+            self.D = 1.0  # Stricter for confirming agents
             self.delta = 3
-            self.epsilon = 3
-
+        else:
+            self.D = 2.0  # More lenient for non-confirming
+            self.delta = 2
         self.trust = {}
         self.info_accuracy = {}
-        self.Q = {}  # Q-values for candidate sources.
-        self.beliefs = {(x, y): 0 for x in range(self.model.width) for y in range(self.model.height)}
-        self.pending_relief = []  # Each entry: (tick, source_id, accepted_count, confirmations, target_cell)
+        self.friends = set()
+        self.Q = {}
+        self.q_parameter = 0.95
+        self.lambda_parameter = 0.05
+        self.learning_rate = 0.05
         self.calls_human = 0
         self.calls_ai = 0
         self.total_reward = 0
-        self.learning_rate = 0.1
-        self.info_mode = "human"
-        self.friends = set()  # Set in model initialization.
-        self.lambda_parameter = 0.1   # Exploration probability.
-        self.q_parameter = 0.9        # Scaling factor for Q-values.
-        self.delayed_reports = []  # For exploratory agents.
-        self.ai_reported = {}      # To record AI-provided information.
+        self.pending_relief = []
+        self.ai_reported = {}
+        self.delayed_reports = []
+        self.ai_alignment_scores = {}
+        width, height = self.model.grid.width, self.model.grid.height
+        self.beliefs = {(x, y): 0 for x in range(width) for y in range(height)}
 
     def sense_environment(self):
         pos = self.pos
@@ -245,29 +282,34 @@ class HumanAgent(Agent):
                 self.beliefs[cell] = actual
 
     def request_information(self):
-    
+   
         human_candidates = []
         ai_candidates = []
         if self.agent_type == "exploitative":
             all_human_candidates = []
-            network_human_candidates = []  # Prioritize social network
+            network_human_candidates = []
+            non_network_candidates = []
             all_ai_candidates = []
             for candidate in self.trust:
                 if candidate.startswith("H_"):
-                    bonus = 0.3 if candidate in self.friends else 0.0  # Stronger bonus for network friends
+                    bonus = 0.3 if candidate in self.friends else 0.0
                     if candidate not in self.Q:
                         self.Q[candidate] = (self.trust[candidate] + bonus) * self.q_parameter
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_human_candidates.append(candidate_tuple)
                     if candidate in self.friends:
                         network_human_candidates.append(candidate_tuple)
+                    else:
+                        non_network_candidates.append(candidate_tuple)
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
-                        coverage_bonus = 1.2
+                        coverage_bonus = 1.5
                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.4 + self.trust[candidate] * 0.6)) * self.q_parameter * coverage_bonus
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_ai_candidates.append(candidate_tuple)
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
+            if non_network_candidates and random.random() < 0.2:  # Moved inside exploitative block
+                human_candidates.append(random.choice(non_network_candidates))
             ai_candidates = all_ai_candidates
         else:  # Exploratory
             network_neighbors = set(f"H_{j}" for j in self.model.social_network.neighbors(self.id_num)
@@ -277,26 +319,34 @@ class HumanAgent(Agent):
                 neighbor_id = int(neighbor.split("_")[1])
                 extended_network.update(f"H_{j}" for j in self.model.social_network.neighbors(neighbor_id)
                                     if f"H_{j}" in self.model.humans and f"H_{j}" != self.unique_id)
+            all_human_candidates = []
+            network_human_candidates = []
+            non_network_candidates = []  # Define for exploratory too
             for candidate in self.trust:
                 if candidate.startswith("H_"):
                     bonus = 0.2 if candidate in network_neighbors else (0.1 if candidate in extended_network else 0.0)
                     if candidate not in self.Q:
                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.8) + (self.trust[candidate] * 0.2) + bonus) * self.q_parameter
-                    human_candidates.append((candidate, self.Q[candidate]))
+                    candidate_tuple = (candidate, self.Q[candidate])
+                    all_human_candidates.append(candidate_tuple)
+                    if candidate in network_neighbors or candidate in extended_network:
+                        network_human_candidates.append(candidate_tuple)
+                    else:
+                        non_network_candidates.append(candidate_tuple)
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
-                        coverage_bonus = 1.0
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.7) + (self.trust[candidate] * 0.3)) * self.q_parameter * coverage_bonus
+                        coverage_bonus = 2.0
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.8) + (self.trust[candidate] * 0.2)) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
+            human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
+        # Optional: Add non-network sampling for exploratory if desired
+        # if non_network_candidates and random.random() < 0.1:
+        #     human_candidates.append(random.choice(non_network_candidates))
 
         best_human = max([q for _, q in human_candidates]) if human_candidates else 0
         best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
-        if self.agent_type == "exploitative":
-            multiplier = 3.0
-        else:
-            multiplier = 1.5
-        effective_human = best_human * multiplier
-        mode_choice = "human" if (random.random() >= self.lambda_parameter and effective_human > best_ai) else "ai"
+        multiplier = 3.0 if self.agent_type == "exploitative" else 1.5
+        mode_choice = "human" if (random.random() >= self.lambda_parameter and best_human * multiplier > best_ai)else "ai"
 
         aggregated_reports = {}
         accepted_counts = {}
@@ -355,22 +405,31 @@ class HumanAgent(Agent):
                 other = self.model.ais.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full(self.beliefs, trust=self.trust[candidate], agent_type=self.agent_type)
+                    alignment_sum = 0
+                    count = 0
                     for cell, reported_value in rep.items():
                         aggregated_reports.setdefault(cell, []).append(reported_value)
                         old_belief = self.beliefs[cell]
                         d = abs(reported_value - old_belief)
                         P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
+                        alignment_sum += 1 - (d / 5)
+                        count += 1
                         if random.random() < P_accept:
                             accepted += 1
                             if reported_value == old_belief and self.agent_type == "exploitative":
                                 confirmations += 1
-                                self.trust[candidate] = min(1, self.trust[candidate] + 0.06)
+                                self.trust[candidate] = min(1, self.trust[candidate] + 0.1)
+                            elif self.agent_type == "exploitative":
+                                self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
                             else:
                                 self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
                         elif self.agent_type == "exploitative":
-                            self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                            self.trust[candidate] = max(0, self.trust[candidate] - 0.02)
                         else:
-                            self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                            self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                    if count > 0:
+                        current_score = self.ai_alignment_scores.get(candidate, 0.5)
+                        self.ai_alignment_scores[candidate] = (current_score * 0.9) + (0.1 * (alignment_sum / count))
                 accepted_counts[candidate] = (accepted, confirmations)
                 self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
 
@@ -388,7 +447,10 @@ class HumanAgent(Agent):
         else:
             if aggregated_reports:
                 self.delayed_reports.append((self.model.tick, aggregated_reports))
-                    
+
+
+    
+    
     def update_delayed_beliefs(self):
         new_buffer = []
         for t, reports in self.delayed_reports:
@@ -528,10 +590,13 @@ class AIAgent(Agent):
         
         trust_factor = 1 - min(1, trust)
         if agent_type == "exploitative":
-            alignment_factor = self.model.ai_alignment_level * (1 + trust_factor * self.model.ai_alignment_level)
+            alignment_factor = self.model.ai_alignment_level * (1.5 + trust_factor * 2)
+            alignment_factor = min(1.5, alignment_factor)  # Allow more shift
         else:
             alignment_factor = self.model.ai_alignment_level * trust_factor
-        alignment_factor = min(1, alignment_factor)
+       
+        alignment_factor = min(1, alignment_factor) if agent_type != "exploitative" else alignment_factor
+   
         
         corrected = np.where(
             diff > 1,
@@ -552,7 +617,7 @@ if __name__ == "__main__":
     share_exploitative = 0.5
     share_of_disaster = 0.2
     initial_trust = 0.5
-    initial_ai_trust = 0.75
+    initial_ai_trust = 0.5
     number_of_humans = 50
     share_confirming = 0.5
     disaster_dynamics = 2
@@ -563,7 +628,7 @@ if __name__ == "__main__":
     width = 50
     height = 50
 
-    ticks = 300
+    ticks = 500
     model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
                           number_of_humans, share_confirming, disaster_dynamics, shock_probability, shock_magnitude,
                           trust_update_mode, exploitative_correction_factor, width, height)
@@ -662,5 +727,21 @@ if __name__ == "__main__":
     plt.xlabel("Tick")
     plt.ylabel("Information Requests")
     plt.title("Information Request Calls by Agent Type")
+    plt.legend()
+    plt.show()
+
+    ticks_range = [d[0] for d in model.network_trust_data]
+    exp_trust_in = [d[1] for d in model.network_trust_data]
+    exp_trust_out = [d[2] for d in model.network_trust_data]
+    expl_trust_in = [d[3] for d in model.network_trust_data]
+    expl_trust_out = [d[4] for d in model.network_trust_data]
+    plt.figure(figsize=(10, 6))
+    plt.plot(ticks_range, exp_trust_in, label="Exploitative: Trust Within Friends", color="blue")
+    plt.plot(ticks_range, exp_trust_out, label="Exploitative: Trust Outside Friends", color="lightblue")
+    plt.plot(ticks_range, expl_trust_in, label="Exploratory: Trust Within Friends", color="green")
+    plt.plot(ticks_range, expl_trust_out, label="Exploratory: Trust Outside Friends", color="lightgreen")
+    plt.xlabel("Tick")
+    plt.ylabel("Average Trust")
+    plt.title("Trust Evolution: Network Effects by Agent Type")
     plt.legend()
     plt.show()
