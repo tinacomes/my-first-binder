@@ -26,7 +26,8 @@ class DisasterModel(Model):
                  trust_update_mode="average", # (Not used further here)
                  ai_alignment_level=0.5,      # ai alignment
                  exploitative_correction_factor=1.0,  # (Not used further)
-                 width=50, height=50):
+                 width=50, height=50,
+                 lambda_parameter=0.5):
         super().__init__()
         self.share_exploitative = share_exploitative
         self.share_of_disaster = share_of_disaster
@@ -43,10 +44,14 @@ class DisasterModel(Model):
         self.trust_update_mode = trust_update_mode
         self.exploitative_correction_factor = exploitative_correction_factor
         self.ai_alignment_level = ai_alignment_level
+        self.lambda_parameter = lambda_parameter
 
         self.grid = MultiGrid(width, height, torus=False)
         self.schedule = RandomActivation(self)
         self.tick = 0
+        self.tokens_this_tick = {}  
+        self.global_variance_data = []  # variance tracking for seci 
+        self.friend_variance_data = []  
 
         # For tracking assistance:
         self.assistance_exploit = {}
@@ -58,6 +63,7 @@ class DisasterModel(Model):
         #ECHO chamber effects for humans and AI: SECI and AECI
         self.seci_data = []  # (tick, avg_seci_exp, avg_seci_expl) #add metric for social echo chamber
         self.aeci_data = [] 
+        self.correlation_data = []  # (tick, corr_exp, corr_expl) track correlation
         
         # Disaster Grid as numpy arrays
         self.disaster_grid = np.zeros((width, height), dtype=int)
@@ -86,7 +92,7 @@ class DisasterModel(Model):
             self.schedule.add(a)
             x = random.randrange(width)
             y = random.randrange(height)
-            self.grid.place_agent(a, (x, y))
+            self.grid.place_agent(a, (x, y))   
 
         # Initialize trust and info_accuracy for each human.
         self.network_trust_data = []  # (tick, avg_trust_in_friends, avg_trust_outside)
@@ -140,21 +146,23 @@ class DisasterModel(Model):
         self.disaster_grid = np.clip(self.disaster_grid + change + shocks, 0, 5)
 
     def step(self):
-   
-  
-        self.tokens_this_tick = {}
-        self.update_disaster()
-        self.schedule.step()
-
-        need_mask = self.disaster_grid >= 4
+        self.tick += 1
+        self.tokens_this_tick = {}  #
+        if self.disaster_dynamics:
+            self.update_disaster()
+        self.schedule.step()  # Agents run their steps (sense, request, send_relief)
+       
+        # Track unmet needs
         height, width = self.disaster_grid.shape
         token_array = np.zeros((height, width), dtype=int)
         for pos, count in self.tokens_this_tick.items():
             x, y = pos
             token_array[x, y] = count
+        need_mask = self.disaster_grid >= 4
         unmet = np.sum(need_mask & (token_array == 0))
         self.unmet_needs_evolution.append(unmet)
 
+        # Process rewards
         total_reward_exploit = 0
         total_reward_explor = 0
         for agent in self.humans.values():
@@ -163,7 +171,11 @@ class DisasterModel(Model):
                 total_reward_exploit += agent.total_reward
             else:
                 total_reward_explor += agent.total_reward
+            # Debug pending_relief (uncomment for early ticks)
+            # if self.tick < 5:
+            #     print(f"Agent {agent.unique_id}: pending_relief = {agent.pending_relief}")
 
+        # Trust and call tracking
         called_sources = set()
         exp_human_trust = []
         exp_ai_trust = []
@@ -220,8 +232,8 @@ class DisasterModel(Model):
 
         seci_exp = []
         seci_expl = []
-        exp_friend_vars = []  # Initialise friend variance
-        expl_friend_vars = []  
+        exp_friend_vars = []
+        expl_friend_vars = []
         for agent in self.humans.values():
             friend_ids = agent.friends
             friend_beliefs = []
@@ -230,17 +242,28 @@ class DisasterModel(Model):
                 if friend:
                     friend_beliefs.extend(friend.beliefs.values())
             friend_variance = np.var(friend_beliefs) if friend_beliefs else global_variance
-            seci = 1 - (friend_variance / global_variance) if global_variance > 0 else 0
+            seci = max(0, 1 - (friend_variance / global_variance)) if global_variance > 0 else 0
             if agent.agent_type == "exploitative":
                 seci_exp.append(seci)
                 exp_friend_vars.append(friend_variance)
             else:
                 seci_expl.append(seci)
                 expl_friend_vars.append(friend_variance)
-        self.seci_data.append((self.tick, np.mean(seci_exp) if seci_exp else 0, np.mean(seci_expl) if seci_expl else 0))
 
-    # Debug output (remove after verification)
-        if self.tick % 50 == 0:  # Print every 50 ticks
+        self.seci_data.append((
+            self.tick,
+            np.mean(seci_exp) if seci_exp else 0,
+            np.mean(seci_expl) if seci_expl else 0
+        ))
+        self.global_variance_data.append((self.tick, global_variance))
+        self.friend_variance_data.append((
+            self.tick,
+            np.mean(exp_friend_vars) if exp_friend_vars else 0,
+            np.mean(expl_friend_vars) if expl_friend_vars else 0
+        ))
+
+        # Debug output (optional)
+        if self.tick % 50 == 0:
             print(f"Tick {self.tick}:")
             print(f"  Global Variance: {global_variance}")
             print(f"  Exploitative Friend Variance: {np.mean(exp_friend_vars) if exp_friend_vars else 0}")
@@ -251,12 +274,12 @@ class DisasterModel(Model):
         aeci_exp = []
         aeci_expl = []
         for agent in self.humans.values():
-            total_calls = (agent.calls_human + agent.calls_ai) or 1  # Avoid division by zero
+            total_calls = (agent.calls_human + agent.calls_ai) or 1
             ai_contribution = 0
             for ai_id in [f"A_{k}" for k in range(self.num_ai)]:
                 calls = sum(1 for entry in agent.pending_relief if len(entry) >= 2 and entry[1] == ai_id)
                 trust = agent.trust.get(ai_id, 0)
-                alignment = agent.ai_alignment_scores.get(ai_id, 0.5)  # From request_information()
+                alignment = agent.ai_alignment_scores.get(ai_id, 0.5)
                 ai_contribution += calls * trust * alignment
             aeci = ai_contribution / total_calls
             if agent.agent_type == "exploitative":
@@ -264,28 +287,39 @@ class DisasterModel(Model):
             else:
                 aeci_expl.append(aeci)
         self.aeci_data.append((self.tick, np.mean(aeci_exp) if aeci_exp else 0, np.mean(aeci_expl) if aeci_expl else 0))
-        
-        # Adjusted trust decay for divergence
+
+        # Correlation calculation
+        window = 50
+        if self.tick >= window:
+            seci_exp_window = [d[1] for d in self.seci_data[-window:]]
+            aeci_exp_window = [d[1] for d in self.aeci_data[-window:]]
+            seci_expl_window = [d[2] for d in self.seci_data[-window:]]
+            aeci_expl_window = [d[2] for d in self.aeci_data[-window:]]
+            corr_exp = np.corrcoef(seci_exp_window, aeci_exp_window)[0, 1] if len(seci_exp_window) > 1 else 0
+            corr_expl = np.corrcoef(seci_expl_window, aeci_expl_window)[0, 1] if len(seci_expl_window) > 1 else 0
+            self.correlation_data.append((self.tick, corr_exp, corr_expl))
+
+        # Trust decay
         for agent in self.humans.values():
             for source in agent.trust:
                 if source not in called_sources:
                     if agent.agent_type == "exploitative":
                         decay = 0.001 if (source.startswith("H_") and source in agent.friends) else \
-                                0.025 if source.startswith("H_") else 0.02  # Increased for non-friends and AI
+                                0.025 if source.startswith("H_") else 0.02
                     else:
-                        decay = 0.01  # Slightly increased for exploratory
+                        decay = 0.01
                     agent.trust[source] = max(0, agent.trust[source] - decay)
 
+        # Store data
         avg_exp_human_trust = np.mean(exp_human_trust) if exp_human_trust else 0
         avg_exp_ai_trust = np.mean(exp_ai_trust) if exp_ai_trust else 0
         avg_expl_human_trust = np.mean(expl_human_trust) if expl_human_trust else 0
         avg_expl_ai_trust = np.mean(expl_ai_trust) if expl_ai_trust else 0
-
         self.trust_data.append((avg_exp_human_trust, avg_exp_ai_trust, avg_expl_human_trust, avg_expl_ai_trust))
         self.calls_data.append((calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai))
         self.rewards_data.append((total_reward_exploit, total_reward_explor))
-        self.tick += 1
-
+        # Note: self.tick is incremented only once at the start
+    
 #########################################
 # Agent Definitions
 #########################################
@@ -297,6 +331,7 @@ class HumanAgent(Agent):
         self.id_num = id_num
         self.pos = None
         self.agent_type = agent_type
+        self.tokens = 5
         self.share_confirming = share_confirming
         # Determine if this agent is confirming (only for exploitative)
         self.is_confirming = (agent_type == "exploitative" and random.random() < share_confirming)
@@ -312,7 +347,7 @@ class HumanAgent(Agent):
         self.friends = set()
         self.Q = {}
         self.q_parameter = 0.95
-        self.lambda_parameter = 0.05
+        self.lambda_parameter = 0.5
         self.learning_rate = 0.05
         self.calls_human = 0
         self.calls_ai = 0
@@ -347,9 +382,9 @@ class HumanAgent(Agent):
             all_ai_candidates = []
             for candidate in self.trust:
                 if candidate.startswith("H_"):
-                    bonus = 0.3 if candidate in self.friends else 0.0
+                    bonus = 0.4 if candidate in self.friends else 0.0
                     if candidate not in self.Q:
-                        self.Q[candidate] = (self.trust[candidate] + bonus) * self.q_parameter
+                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.2) + (self.trust[candidate] * 0.8) + bonus) * self.q_parameter  # Trust-weighted
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_human_candidates.append(candidate_tuple)
                     if candidate in self.friends:
@@ -358,12 +393,13 @@ class HumanAgent(Agent):
                         non_network_candidates.append(candidate_tuple)
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
-                        coverage_bonus = 1.5
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.4 + self.trust[candidate] * 0.6)) * self.q_parameter * coverage_bonus
+                        coverage_bonus = 1.2
+                        # exploitative : accuracy 0.2 + trust 0.8
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.2 + self.trust[candidate] * 0.8)) * self.q_parameter * coverage_bonus
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_ai_candidates.append(candidate_tuple)
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
-            if non_network_candidates and random.random() < 0.2:  # Moved inside exploitative block
+            if non_network_candidates and random.random() < 0.1:
                 human_candidates.append(random.choice(non_network_candidates))
             ai_candidates = all_ai_candidates
         else:  # Exploratory
@@ -376,11 +412,12 @@ class HumanAgent(Agent):
                                     if f"H_{j}" in self.model.humans and f"H_{j}" != self.unique_id)
             all_human_candidates = []
             network_human_candidates = []
-            non_network_candidates = []  # Define for exploratory too
+            non_network_candidates = []
             for candidate in self.trust:
                 if candidate.startswith("H_"):
-                    bonus = 0.2 if candidate in network_neighbors else (0.1 if candidate in extended_network else 0.0)
+                    bonus = 0.2 if candidate in network_neighbors else (0.1 if candidate in extended_network else 0.05)  # Graduated bonuses
                     if candidate not in self.Q:
+                        #exploratory: weight accuracy 0.8 + trust 0.2
                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.8) + (self.trust[candidate] * 0.2) + bonus) * self.q_parameter
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_human_candidates.append(candidate_tuple)
@@ -390,18 +427,15 @@ class HumanAgent(Agent):
                         non_network_candidates.append(candidate_tuple)
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
-                        coverage_bonus = 2.0
+                        coverage_bonus = 1.5 #keep to 1.5 for exploratory
                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.8) + (self.trust[candidate] * 0.2)) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
-        # Optional: Add non-network sampling for exploratory if desired
-        # if non_network_candidates and random.random() < 0.1:
-        #     human_candidates.append(random.choice(non_network_candidates))
 
         best_human = max([q for _, q in human_candidates]) if human_candidates else 0
         best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
-        multiplier = 3.0 if self.agent_type == "exploitative" else 1.5
-        mode_choice = "human" if (random.random() >= self.lambda_parameter and best_human * multiplier > best_ai)else "ai"
+        multiplier = 1.0 if self.agent_type == "exploitative" else 1.0 #no multiplier for now
+        mode_choice = "human" if (random.random() >= self.lambda_parameter and best_human * multiplier > best_ai) else "ai"
 
         aggregated_reports = {}
         accepted_counts = {}
@@ -438,9 +472,12 @@ class HumanAgent(Agent):
                                 accepted += 1
                                 if reported_value == old_belief and self.agent_type == "exploitative":
                                     confirmations += 1
-                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.1)
-                                else:
+                                    trust_boost = 0.15 if self.is_confirming else 0.1
+                                    self.trust[candidate] = min(1, self.trust[candidate] + trust_boost)
+                                elif self.agent_type == "exploitative":
                                     self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                                else:
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
                             elif self.agent_type == "exploitative":
                                 self.trust[candidate] = max(0, self.trust[candidate] - 0.02)
                             else:
@@ -473,7 +510,8 @@ class HumanAgent(Agent):
                             accepted += 1
                             if reported_value == old_belief and self.agent_type == "exploitative":
                                 confirmations += 1
-                                self.trust[candidate] = min(1, self.trust[candidate] + 0.1)
+                                trust_boost = 0.15 if self.is_confirming else 0.1
+                                self.trust[candidate] = min(1, self.trust[candidate] + trust_boost)
                             elif self.agent_type == "exploitative":
                                 self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
                             else:
@@ -497,12 +535,16 @@ class HumanAgent(Agent):
                 avg_report = sum(reports) / len(reports)
                 current_value = self.beliefs[cell]
                 difference = avg_report - current_value
-                scaling = 1 + 0.2 * (len(reports) - 1) if self.is_confirming else 1 + 0.1 * (len(reports) - 1)  # Stronger for confirming
+                scaling = 1 + 0.3 * (len(reports) - 1) if self.is_confirming else 1 + 0.2 * (len(reports) - 1)
                 self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
         else:
             if aggregated_reports:
-                self.delayed_reports.append((self.model.tick, aggregated_reports))  # No immediate update, keeps diversity
-    
+                for cell, reports in aggregated_reports.items():
+                    avg_report = sum(reports) / len(reports)
+                    current_value = self.beliefs[cell]
+                    difference = avg_report - current_value
+                    scaling = 0.5 if any(r[1] is not None and r[1].startswith("H_") for r in self.pending_relief) else 1.0  # Check for None
+                    self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
     
     def update_delayed_beliefs(self):
         new_buffer = []
@@ -520,30 +562,39 @@ class HumanAgent(Agent):
 
 
     def send_relief(self):
-        tokens_to_send = 5
+        # Define tokens based on agent type
+        self.tokens = 5  # Assuming each agent starts with 5 tokens per step; adjust if stored elsewhere
+        tokens_to_send = self.tokens * 0.5 if self.agent_type == "exploitative" else self.tokens * 0.35
+
+        # Determine target cells
         if self.agent_type == "exploitative":
             cells = self.model.grid.get_neighborhood(self.pos, moore=True, radius=1, include_center=True)
         else:
-            # Generate all (x, y) coordinates from array shape
             height, width = self.model.disaster_grid.shape
             cells = [(x, y) for x in range(width) for y in range(height)]
-    
-        friend_positions = set()
-        for friend_id in self.friends:
-            if friend_id in self.model.humans:
-                friend_positions.add(self.model.humans[friend_id].pos)
-    
+
+        # Friend positions for scoring
+        friend_positions = {self.model.humans[friend_id].pos for friend_id in self.friends if friend_id in self.model.humans}
+
+        # Score cells based on beliefs and friend proximity
         def cell_score(cell):
             x, y = cell
-            score = self.beliefs.get(cell, 0)  # Beliefs still uses tuples, unchanged for now
+            score = self.beliefs.get(cell, 0)
             if cell in friend_positions:
                 score += 1
             return score
-    
+
+        # Select cells to send tokens to
         sorted_cells = sorted(cells, key=cell_score, reverse=True)
-        selected = [c for c in sorted_cells if cell_score(c) >= 3][:tokens_to_send]
+        num_cells_to_send = min(int(tokens_to_send), len(sorted_cells))  # Tokens as float, convert to int
+        selected = [c for c in sorted_cells if cell_score(c) >= 3][:num_cells_to_send]
+
+        # Send tokens and record in pending_relief
         for cell in selected:
             self.pending_relief.append((self.model.tick, None, 0, 0, cell))
+            self.model.tokens_this_tick[cell] = self.model.tokens_this_tick.get(cell, 0) + 1
+        self.tokens -= num_cells_to_send  # Deduct integer number of tokens sent
+    
     
     def process_relief_actions(self, current_tick, disaster_grid):
         
@@ -680,6 +731,7 @@ if __name__ == "__main__":
     exploitative_correction_factor = 1.0
     width = 50
     height = 50
+    
 
     ticks = 150
     model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
@@ -825,10 +877,26 @@ if __name__ == "__main__":
     plt.legend()
     plt.show()
 
-    # Correlation between SECI and AECI
+    # Correlation Plot
+    ticks_range = [d[0] for d in model.correlation_data]
+    corr_exp = [d[1] for d in model.correlation_data]
+    corr_expl = [d[2] for d in model.correlation_data]
+    plt.figure(figsize=(10, 6))
+    plt.plot(ticks_range, corr_exp, label="Correlation SECI-AECI: Exploitative", color="blue")
+    plt.plot(ticks_range, corr_expl, label="Correlation SECI-AECI: Exploratory", color="green")
+    plt.xlabel("Tick")
+    plt.ylabel("Correlation Coefficient")
+    plt.title("Evolution of SECI-AECI Correlation")
+    plt.legend()
+    plt.show()
+
+    # Final static correlation (for reference)
     seci_exp_vals = [d[1] for d in model.seci_data]
     aeci_exp_vals = [d[1] for d in model.aeci_data]
-    correlation_exp = np.corrcoef(seci_exp_vals, aeci_exp_vals)[0, 1] if len(seci_exp_vals) > 1 else 0
-    print(f"Correlation between Exploitative SECI and AECI: {correlation_exp:.3f}")
-
+    seci_expl_vals = [d[2] for d in model.seci_data]
+    aeci_expl_vals = [d[2] for d in model.aeci_data]
+    corr_exp = np.corrcoef(seci_exp_vals, aeci_exp_vals)[0, 1] if len(seci_exp_vals) > 1 else 0
+    corr_expl = np.corrcoef(seci_expl_vals, aeci_expl_vals)[0, 1] if len(seci_expl_vals) > 1 else 0
+    print(f"Final Correlation Exploitative SECI-AECI: {corr_exp:.3f}")
+    print(f"Final Correlation Exploratory SECI-AECI: {corr_expl:.3f}")
 
