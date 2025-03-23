@@ -4,6 +4,7 @@ import math
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import scipy.stats as stats
 
 from mesa import Agent, Model
 from mesa.space import MultiGrid
@@ -24,7 +25,7 @@ class DisasterModel(Model):
                  shock_probability=0.1,       # Probability that a shock occurs.
                  shock_magnitude=2,           # Maximum shock magnitude.
                  trust_update_mode="average", # (Not used further here)
-                 ai_alignment_level=0.5,      # ai alignment
+                 ai_alignment_level=0.3,      # ai alignment
                  exploitative_correction_factor=1.0,  # (Not used further)
                  width=50, height=50,
                  lambda_parameter=0.5):
@@ -106,10 +107,11 @@ class DisasterModel(Model):
                 if agent_id == f"H_{j}":
                     continue
                 agent.trust[f"H_{j}"] = random.uniform(self.base_trust - 0.05, self.base_trust + 0.05)
-                agent.info_accuracy[f"H_{j}"] = random.uniform(0.4, 0.6)
+                agent.info_accuracy[f"H_{j}"] = random.uniform(0.3, 0.7)
             for friend_id in agent.friends:
                 agent.trust[friend_id] = min(1, agent.trust[friend_id] + 0.1)
             for k in range(self.num_ai):
+                ai_trust = initial_ai_trust if agent.agent_type == "exploitative" else initial_ai_trust - 0.1  # Lower initial AI trust for exploratory
                 agent.trust[f"A_{k}"] = random.uniform(self.base_ai_trust - 0.1, self.base_ai_trust + 0.1)
                 agent.info_accuracy[f"A_{k}"] = random.uniform(0.4, 0.7)
 
@@ -288,26 +290,26 @@ class DisasterModel(Model):
                 aeci_expl.append(aeci)
         self.aeci_data.append((self.tick, np.mean(aeci_exp) if aeci_exp else 0, np.mean(aeci_expl) if aeci_expl else 0))
 
-        # Correlation calculation
+        # Correlation calculation AECI / SECI
         window = 50
         if self.tick >= window:
             seci_exp_window = [d[1] for d in self.seci_data[-window:]]
             aeci_exp_window = [d[1] for d in self.aeci_data[-window:]]
             seci_expl_window = [d[2] for d in self.seci_data[-window:]]
             aeci_expl_window = [d[2] for d in self.aeci_data[-window:]]
-            corr_exp = np.corrcoef(seci_exp_window, aeci_exp_window)[0, 1] if len(seci_exp_window) > 1 else 0
-            corr_expl = np.corrcoef(seci_expl_window, aeci_expl_window)[0, 1] if len(seci_expl_window) > 1 else 0
-            self.correlation_data.append((self.tick, corr_exp, corr_expl))
-
+            corr_exp, p_exp = stats.pearsonr(seci_exp_window, aeci_exp_window) if len(seci_exp_window) > 1 else (0, 1)
+            corr_expl, p_expl = stats.pearsonr(seci_expl_window, aeci_expl_window) if len(seci_expl_window) > 1 else (0, 1)
+            self.correlation_data.append((self.tick, corr_exp, corr_expl, p_exp, p_expl))
+        
         # Trust decay
         for agent in self.humans.values():
             for source in agent.trust:
                 if source not in called_sources:
                     if agent.agent_type == "exploitative":
-                        decay = 0.001 if (source.startswith("H_") and source in agent.friends) else \
-                                0.025 if source.startswith("H_") else 0.02
+                        decay = 0.005 if (source.startswith("H_") and source in agent.friends) else \
+                                0.025 if source.startswith("H_") else 0.03
                     else:
-                        decay = 0.01
+                        decay = 0.02
                     agent.trust[source] = max(0, agent.trust[source] - decay)
 
         # Store data
@@ -315,7 +317,17 @@ class DisasterModel(Model):
         avg_exp_ai_trust = np.mean(exp_ai_trust) if exp_ai_trust else 0
         avg_expl_human_trust = np.mean(expl_human_trust) if expl_human_trust else 0
         avg_expl_ai_trust = np.mean(expl_ai_trust) if expl_ai_trust else 0
-        self.trust_data.append((avg_exp_human_trust, avg_exp_ai_trust, avg_expl_human_trust, avg_expl_ai_trust))
+       
+        self.trust_data.append((
+            self.tick,
+            np.mean(exp_ai_trust) if exp_ai_trust else 0,      # Exploitative AI trust
+            np.mean(expl_ai_trust) if expl_ai_trust else 0,    # Exploratory AI trust
+            np.mean(exp_trust_in) if exp_trust_in else 0,      # Exploitative friend trust
+            np.mean(exp_trust_out) if exp_trust_out else 0,    # Exploitative non-friend trust
+            np.mean(expl_trust_in) if expl_trust_in else 0,    # Exploratory friend trust
+            np.mean(expl_trust_out) if expl_trust_out else 0   # Exploratory non-friend trust
+            ))
+        
         self.calls_data.append((calls_exp_human, calls_exp_ai, calls_expl_human, calls_expl_ai))
         self.rewards_data.append((total_reward_exploit, total_reward_explor))
         # Note: self.tick is incremented only once at the start
@@ -382,7 +394,7 @@ class HumanAgent(Agent):
             all_ai_candidates = []
             for candidate in self.trust:
                 if candidate.startswith("H_"):
-                    bonus = 0.4 if candidate in self.friends else 0.0
+                    bonus = 0.5 if candidate in self.friends else 0.0
                     if candidate not in self.Q:
                          self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.2) + (self.trust[candidate] * 0.8) + bonus) * self.q_parameter  # Trust-weighted
                     candidate_tuple = (candidate, self.Q[candidate])
@@ -434,7 +446,8 @@ class HumanAgent(Agent):
 
         best_human = max([q for _, q in human_candidates]) if human_candidates else 0
         best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
-        multiplier = 1.0 if self.agent_type == "exploitative" else 1.0 #no multiplier for now
+        multiplier = 2.0 if self.agent_type == "exploitative" else 1.0 # multiplier for humans
+        lambda_param = 0.3 if self.agent_type == "exploitative" else 0.5  # Lower lambda for exploitative
         mode_choice = "human" if (random.random() >= self.lambda_parameter and best_human * multiplier > best_ai) else "ai"
 
         aggregated_reports = {}
@@ -481,7 +494,7 @@ class HumanAgent(Agent):
                             elif self.agent_type == "exploitative":
                                 self.trust[candidate] = max(0, self.trust[candidate] - 0.02)
                             else:
-                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
                 accepted_counts[candidate] = (accepted, confirmations)
                 self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
         else:
@@ -613,8 +626,13 @@ class HumanAgent(Agent):
                 if level >= 4 and (self.model.assistance_exploit.get(target_cell, 0) + self.model.assistance_explor.get(target_cell, 0)) == 0:
                     reward = 10
                 if level <= 2:
-                    reward = -0.05 * accepted_count
+                    reward = -0.2 * accepted_count #penalty for wrong tokens
+                    if source_id:
+                        penalty = 0.1 if self.agent_type == "exploitative" else 0.15  # Higher for exploratory
+                        self.trust[source_id] = max(0, self.trust[source_id] - penalty)
+                        self.Q[source_id] = max(0, self.Q[source_id] - penalty * self.q_parameter)
                 self.total_reward += reward
+               
                 if source_id and self.agent_type == "exploratory":  # Update accuracy
                     actual_diff = abs(self.beliefs[target_cell] - level)
                     self.info_accuracy[source_id] = max(0, min(1, self.info_accuracy.get(source_id, 0.5) - 0.05 * actual_diff))
@@ -796,7 +814,7 @@ if __name__ == "__main__":
     plt.legend()
     plt.show()
 
-    # Visual 3-5 remain unchanged as they don’t use disaster_grid.items()
+   
     plt.figure()
     plt.plot(range(len(model.unmet_needs_evolution)), model.unmet_needs_evolution, marker='o')
     plt.title("Time Series: Unmet Needs\n(Number of Cells in Need Without Assistance)")
@@ -804,22 +822,51 @@ if __name__ == "__main__":
     plt.ylabel("Unassisted Cells (Level ≥ 4)")
     plt.show()
 
-    ticks_range = list(range(ticks))
-    exp_human_trust = [d[0] for d in model.trust_data]
-    exp_ai_trust = [d[1] for d in model.trust_data]
-    expl_human_trust = [d[2] for d in model.trust_data]
-    expl_ai_trust = [d[3] for d in model.trust_data]
-    plt.figure()
-    plt.plot(ticks_range, exp_human_trust, label="Exploitative: Human Trust")
-    plt.plot(ticks_range, exp_ai_trust, label="Exploitative: AI Trust")
-    plt.plot(ticks_range, expl_human_trust, label="Exploratory: Human Trust")
-    plt.plot(ticks_range, expl_ai_trust, label="Exploratory: AI Trust")
-    plt.xlabel("Tick")
-    plt.ylabel("Average Trust")
-    plt.title("Trust Evolution by Agent Type")
-    plt.legend()
-    plt.show()
 
+    # Visual: Heatmap of token distribution with epicenter
+    exploit_token_grid = np.zeros((height, width))
+    explor_token_grid = np.zeros((height, width))
+    for x in range(width):
+        for y in range(height):
+            pos = (x, y)
+            exploit_token_grid[x, y] = model.assistance_exploit.get(pos, 0) + model.assistance_incorrect_exploit.get(pos, 0)
+            explor_token_grid[x, y] = model.assistance_explor.get(pos, 0) + model.assistance_incorrect_explor.get(pos, 0)
+
+    plt.figure(figsize=(12, 5))
+    # Exploitative heatmap
+    plt.subplot(1, 2, 1)
+    plt.imshow(exploit_token_grid, cmap="Blues", interpolation="nearest")
+    plt.scatter(model.epicenter[0], model.epicenter[1], c="red", marker="x", s=100, label="Epicenter")
+    plt.title("Exploitative Token Distribution")
+    plt.colorbar(label="Total Tokens Sent")
+    plt.legend()
+    # Exploratory heatmap
+    plt.subplot(1, 2, 2)
+    plt.imshow(explor_token_grid, cmap="Greens", interpolation="nearest")
+    plt.scatter(model.epicenter[0], model.epicenter[1], c="red", marker="x", s=100, label="Epicenter")
+    plt.title("Exploratory Token Distribution")
+    plt.colorbar(label="Total Tokens Sent")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    
+ #   ticks_range = list(range(ticks))
+  #  exp_human_trust = [d[0] for d in model.trust_data]
+   # exp_ai_trust = [d[1] for d in model.trust_data]
+    #expl_human_trust = [d[2] for d in model.trust_data]
+ #   expl_ai_trust = [d[3] for d in model.trust_data]
+  #  plt.figure()
+   # plt.plot(ticks_range, exp_human_trust, label="Exploitative: Human Trust")
+    #plt.plot(ticks_range, exp_ai_trust, label="Exploitative: AI Trust")
+#    plt.plot(ticks_range, expl_human_trust, label="Exploratory: Human Trust")
+ #   plt.plot(ticks_range, expl_ai_trust, label="Exploratory: AI Trust")
+  #  plt.xlabel("Tick")
+   # plt.ylabel("Average Trust")
+    #plt.title("Trust Evolution by Agent Type")
+ #   plt.legend()
+#    plt.show()
+
+    ticks_range = list(range(ticks))  # Define ticks_range here
     calls_exp_human = [d[0]/5 for d in model.calls_data]
     calls_exp_ai = [d[1] for d in model.calls_data]
     calls_expl_human = [d[2]/5 for d in model.calls_data]
@@ -835,21 +882,26 @@ if __name__ == "__main__":
     plt.legend()
     plt.show()
 
-    ticks_range = [d[0] for d in model.network_trust_data]
-    exp_trust_in = [d[1] for d in model.network_trust_data]
-    exp_trust_out = [d[2] for d in model.network_trust_data]
-    expl_trust_in = [d[3] for d in model.network_trust_data]
-    expl_trust_out = [d[4] for d in model.network_trust_data]
-    plt.figure(figsize=(10, 6))
-    plt.plot(ticks_range, exp_trust_in, label="Exploitative: Trust Within Friends", color="blue")
-    plt.plot(ticks_range, exp_trust_out, label="Exploitative: Trust Outside Friends", color="lightblue")
-    plt.plot(ticks_range, expl_trust_in, label="Exploratory: Trust Within Friends", color="green")
-    plt.plot(ticks_range, expl_trust_out, label="Exploratory: Trust Outside Friends", color="lightgreen")
+    ticks_range = [d[0] for d in model.trust_data]
+    exp_ai_trust = [d[1] for d in model.trust_data]
+    expl_ai_trust = [d[2] for d in model.trust_data]
+    exp_friend_trust = [d[3] for d in model.trust_data]
+    exp_nonfriend_trust = [d[4] for d in model.trust_data]
+    expl_friend_trust = [d[5] for d in model.trust_data]
+    expl_nonfriend_trust = [d[6] for d in model.trust_data]
+    plt.figure(figsize=(12, 6))
+    plt.plot(ticks_range, exp_ai_trust, label="Exploitative: AI Trust", color="blue", linestyle="--")
+    plt.plot(ticks_range, expl_ai_trust, label="Exploratory: AI Trust", color="green", linestyle="--")
+    plt.plot(ticks_range, exp_friend_trust, label="Exploitative: Friend Trust", color="blue", linestyle="-")
+    plt.plot(ticks_range, exp_nonfriend_trust, label="Exploitative: Non-Friend Trust", color="blue", linestyle=":")
+    plt.plot(ticks_range, expl_friend_trust, label="Exploratory: Friend Trust", color="green", linestyle="-")
+    plt.plot(ticks_range, expl_nonfriend_trust, label="Exploratory: Non-Friend Trust", color="green", linestyle=":")
     plt.xlabel("Tick")
     plt.ylabel("Average Trust")
-    plt.title("Trust Evolution: Network Effects by Agent Type")
+    plt.title("Trust Evolution: AI, Friends, and Non-Friends by Agent Type")
     plt.legend()
     plt.show()
+
 
     # SECI plot
     ticks_range = [d[0] for d in model.seci_data]
