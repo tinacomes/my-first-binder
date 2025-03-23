@@ -55,8 +55,10 @@ class DisasterModel(Model):
         self.assistance_incorrect_explor = {}
         self.unmet_needs_evolution = []
 
+        #ECHO chamber effects for humans and AI: SECI and AECI
+        self.seci_data = []  # (tick, avg_seci_exp, avg_seci_expl) #add metric for social echo chamber
+        self.aeci_data = [] 
         
-
         # Disaster Grid as numpy arrays
         self.disaster_grid = np.zeros((width, height), dtype=int)
         self.baseline_grid = np.zeros((width, height), dtype=int)
@@ -210,6 +212,59 @@ class DisasterModel(Model):
             np.mean(expl_trust_out)
         ))
 
+        # SECI calculation
+        all_beliefs = []
+        for agent in self.humans.values():
+            all_beliefs.extend(agent.beliefs.values())
+        global_variance = np.var(all_beliefs) if all_beliefs else 1e-6  # Avoid division by zero
+
+        seci_exp = []
+        seci_expl = []
+        exp_friend_vars = []  # Initialise friend variance
+        expl_friend_vars = []  
+        for agent in self.humans.values():
+            friend_ids = agent.friends
+            friend_beliefs = []
+            for friend_id in friend_ids:
+                friend = self.humans.get(friend_id)
+                if friend:
+                    friend_beliefs.extend(friend.beliefs.values())
+            friend_variance = np.var(friend_beliefs) if friend_beliefs else global_variance
+            seci = 1 - (friend_variance / global_variance) if global_variance > 0 else 0
+            if agent.agent_type == "exploitative":
+                seci_exp.append(seci)
+                exp_friend_vars.append(friend_variance)
+            else:
+                seci_expl.append(seci)
+                expl_friend_vars.append(friend_variance)
+        self.seci_data.append((self.tick, np.mean(seci_exp) if seci_exp else 0, np.mean(seci_expl) if seci_expl else 0))
+
+    # Debug output (remove after verification)
+        if self.tick % 50 == 0:  # Print every 50 ticks
+            print(f"Tick {self.tick}:")
+            print(f"  Global Variance: {global_variance}")
+            print(f"  Exploitative Friend Variance: {np.mean(exp_friend_vars) if exp_friend_vars else 0}")
+            print(f"  Exploratory Friend Variance: {np.mean(expl_friend_vars) if expl_friend_vars else 0}")
+            print(f"  SECI Exp: {np.mean(seci_exp) if seci_exp else 0}, SECI Expl: {np.mean(seci_expl) if seci_expl else 0}")
+
+        # AECI calculation
+        aeci_exp = []
+        aeci_expl = []
+        for agent in self.humans.values():
+            total_calls = (agent.calls_human + agent.calls_ai) or 1  # Avoid division by zero
+            ai_contribution = 0
+            for ai_id in [f"A_{k}" for k in range(self.num_ai)]:
+                calls = sum(1 for entry in agent.pending_relief if len(entry) >= 2 and entry[1] == ai_id)
+                trust = agent.trust.get(ai_id, 0)
+                alignment = agent.ai_alignment_scores.get(ai_id, 0.5)  # From request_information()
+                ai_contribution += calls * trust * alignment
+            aeci = ai_contribution / total_calls
+            if agent.agent_type == "exploitative":
+                aeci_exp.append(aeci)
+            else:
+                aeci_expl.append(aeci)
+        self.aeci_data.append((self.tick, np.mean(aeci_exp) if aeci_exp else 0, np.mean(aeci_expl) if aeci_expl else 0))
+        
         # Adjusted trust decay for divergence
         for agent in self.humans.values():
             for source in agent.trust:
@@ -442,13 +497,11 @@ class HumanAgent(Agent):
                 avg_report = sum(reports) / len(reports)
                 current_value = self.beliefs[cell]
                 difference = avg_report - current_value
-                scaling = 1 + 0.1 * (len(reports) - 1)
+                scaling = 1 + 0.2 * (len(reports) - 1) if self.is_confirming else 1 + 0.1 * (len(reports) - 1)  # Stronger for confirming
                 self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
         else:
             if aggregated_reports:
-                self.delayed_reports.append((self.model.tick, aggregated_reports))
-
-
+                self.delayed_reports.append((self.model.tick, aggregated_reports))  # No immediate update, keeps diversity
     
     
     def update_delayed_beliefs(self):
@@ -628,7 +681,7 @@ if __name__ == "__main__":
     width = 50
     height = 50
 
-    ticks = 500
+    ticks = 150
     model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
                           number_of_humans, share_confirming, disaster_dynamics, shock_probability, shock_magnitude,
                           trust_update_mode, exploitative_correction_factor, width, height)
@@ -745,3 +798,37 @@ if __name__ == "__main__":
     plt.title("Trust Evolution: Network Effects by Agent Type")
     plt.legend()
     plt.show()
+
+    # SECI plot
+    ticks_range = [d[0] for d in model.seci_data]
+    seci_exp = [d[1] for d in model.seci_data]
+    seci_expl = [d[2] for d in model.seci_data]
+    plt.figure(figsize=(10, 6))
+    plt.plot(ticks_range, seci_exp, label="SECI: Exploitative", color="blue")
+    plt.plot(ticks_range, seci_expl, label="SECI: Exploratory", color="green")
+    plt.xlabel("Tick")
+    plt.ylabel("Social Echo Chamber Index")
+    plt.title("Echo Chamber Effect Within Friend Groups")
+    plt.legend()
+    plt.show()
+
+    # AECI Plot
+    ticks_range = [d[0] for d in model.aeci_data]
+    aeci_exp = [d[1] for d in model.aeci_data]
+    aeci_expl = [d[2] for d in model.aeci_data]
+    plt.figure(figsize=(10, 6))
+    plt.plot(ticks_range, aeci_exp, label="AECI: Exploitative", color="blue")
+    plt.plot(ticks_range, aeci_expl, label="AECI: Exploratory", color="green")
+    plt.xlabel("Tick")
+    plt.ylabel("AI Echo Chamber Index")
+    plt.title("Echo Chamber Effect with AI")
+    plt.legend()
+    plt.show()
+
+    # Correlation between SECI and AECI
+    seci_exp_vals = [d[1] for d in model.seci_data]
+    aeci_exp_vals = [d[1] for d in model.aeci_data]
+    correlation_exp = np.corrcoef(seci_exp_vals, aeci_exp_vals)[0, 1] if len(seci_exp_vals) > 1 else 0
+    print(f"Correlation between Exploitative SECI and AECI: {correlation_exp:.3f}")
+
+
