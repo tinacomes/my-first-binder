@@ -94,6 +94,7 @@ class DisasterModel(Model):
             x = random.randrange(width)
             y = random.randrange(height)
             self.grid.place_agent(a, (x, y))   
+            a.pos = (x, y)  # explicitly set the agent's position
 
         # Initialize trust and info_accuracy for each human.
         self.network_trust_data = []  # (tick, avg_trust_in_friends, avg_trust_outside)
@@ -124,6 +125,7 @@ class DisasterModel(Model):
             x = random.randrange(width)
             y = random.randrange(height)
             self.grid.place_agent(a, (x, y))
+            a.pos = (x, y)  # explicitly set the agent's position
 
         # Data tracking.
         self.trust_data = []
@@ -306,10 +308,10 @@ class DisasterModel(Model):
             for source in agent.trust:
                 if source not in called_sources:
                     if agent.agent_type == "exploitative":
-                        decay = 0.005 if (source.startswith("H_") and source in agent.friends) else \
-                                0.025 if source.startswith("H_") else 0.03
+                        decay = 0.0005 if (source.startswith("H_") and source in agent.friends) else \
+                                0.02 if source.startswith("H_") else 0.05
                     else:
-                        decay = 0.02
+                        decay = 0.05
                     agent.trust[source] = max(0, agent.trust[source] - decay)
 
         # Store data
@@ -370,6 +372,8 @@ class HumanAgent(Agent):
         self.ai_alignment_scores = {}
         width, height = self.model.grid.width, self.model.grid.height
         self.beliefs = {(x, y): 0 for x in range(width) for y in range(height)}
+        self.epsilon = 0.2         # initial exploration probability
+        self.last_call_tick = 0    # track tick of the last call
 
     def sense_environment(self):
         pos = self.pos
@@ -384,36 +388,37 @@ class HumanAgent(Agent):
                 self.beliefs[cell] = actual
 
     def request_information(self):
-   
         human_candidates = []
         ai_candidates = []
         if self.agent_type == "exploitative":
             all_human_candidates = []
             network_human_candidates = []
             non_network_candidates = []
-            all_ai_candidates = []
             for candidate in self.trust:
                 if candidate.startswith("H_"):
-                    bonus = 0.5 if candidate in self.friends else 0.0
+                    bonus = 1 if candidate in self.friends else 0.0
+                    # Compute base Q-value.
+                    base_q = ((self.info_accuracy.get(candidate, 0.5) * 0.2) + (self.trust[candidate] * 0.8) + bonus)
+                    # small random noise to encourage exploration.
+                    noise = random.uniform(0, 0.1)
+
                     if candidate not in self.Q:
-                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.2) + (self.trust[candidate] * 0.8) + bonus) * self.q_parameter  # Trust-weighted
-                    candidate_tuple = (candidate, self.Q[candidate])
-                    all_human_candidates.append(candidate_tuple)
-                    if candidate in self.friends:
-                        network_human_candidates.append(candidate_tuple)
-                    else:
-                        non_network_candidates.append(candidate_tuple)
+                        self.Q[candidate] = (base_q + noise) * self.q_parameter
+                        candidate_tuple = (candidate, self.Q[candidate])
+                        all_human_candidates.append(candidate_tuple)
+                        if candidate in self.friends:
+                            network_human_candidates.append(candidate_tuple)
+                        else:
+                            non_network_candidates.append(candidate_tuple)
+                    
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
-                        coverage_bonus = 1.2
-                        # exploitative : accuracy 0.2 + trust 0.8
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.2 + self.trust[candidate] * 0.8)) * self.q_parameter * coverage_bonus
-                    candidate_tuple = (candidate, self.Q[candidate])
-                    all_ai_candidates.append(candidate_tuple)
+                        coverage_bonus = 0.8
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.6) + (self.trust[candidate] * 0.4)) * self.q_parameter * coverage_bonus
+                    ai_candidates.append((candidate, self.Q[candidate]))
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
-            if non_network_candidates and random.random() < 0.1:
+            if non_network_candidates and random.random() < 0.05:
                 human_candidates.append(random.choice(non_network_candidates))
-            ai_candidates = all_ai_candidates
         else:  # Exploratory
             network_neighbors = set(f"H_{j}" for j in self.model.social_network.neighbors(self.id_num)
                                 if f"H_{j}" in self.model.humans)
@@ -427,10 +432,9 @@ class HumanAgent(Agent):
             non_network_candidates = []
             for candidate in self.trust:
                 if candidate.startswith("H_"):
-                    bonus = 0.2 if candidate in network_neighbors else (0.1 if candidate in extended_network else 0.05)  # Graduated bonuses
+                    bonus = 0.5 if candidate in network_neighbors else (0.3 if candidate in extended_network else 0.1)
                     if candidate not in self.Q:
-                        #exploratory: weight accuracy 0.8 + trust 0.2
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.8) + (self.trust[candidate] * 0.2) + bonus) * self.q_parameter
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.5) + (self.trust[candidate] * 0.5) + bonus) * self.q_parameter
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_human_candidates.append(candidate_tuple)
                     if candidate in network_neighbors or candidate in extended_network:
@@ -439,35 +443,51 @@ class HumanAgent(Agent):
                         non_network_candidates.append(candidate_tuple)
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
-                        coverage_bonus = 1.5 #keep to 1.5 for exploratory
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.8) + (self.trust[candidate] * 0.2)) * self.q_parameter * coverage_bonus
+                        coverage_bonus = 0.8
+                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.7) + (self.trust[candidate] * 0.3)) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
 
         best_human = max([q for _, q in human_candidates]) if human_candidates else 0
         best_ai = max([q for _, q in ai_candidates]) if ai_candidates else 0
-        multiplier = 2.0 if self.agent_type == "exploitative" else 1.0 # multiplier for humans
-        lambda_param = 0.3 if self.agent_type == "exploitative" else 0.5  # Lower lambda for exploitative
-        mode_choice = "human" if (random.random() >= self.lambda_parameter and best_human * multiplier > best_ai) else "ai"
+        multiplier = 4.0 if self.agent_type == "exploitative" else 1.5
+        lambda_param = 0.15 if self.agent_type == "exploitative" else 0.4
+        if self.agent_type == "exploratory" and random.random() < 0.2:
+            mode_choice = "human"
+        else:
+            mode_choice = "human" if (random.random() >= lambda_param and best_human * multiplier > best_ai) else "ai"
 
         aggregated_reports = {}
         accepted_counts = {}
         if mode_choice == "human":
             candidate_pool = human_candidates.copy()
-            num_calls = 3
+            num_calls = 5 if self.agent_type == "exploitative" else 7
             selected = []
-            for _ in range(num_calls):
-                if candidate_pool:
-                    if random.random() < self.lambda_parameter:
-                        choice = random.choice(candidate_pool)
-                    else:
-                        choice = max(candidate_pool, key=lambda x: x[1])
-                    selected.append(choice)
-                    candidate_pool.remove(choice)
+
+            # Increase exploration if no call was made for a while
+            if self.model.tick - self.last_call_tick > 10:
+                self.epsilon = 0.5  # temporarily boost exploration
+            else:
+                self.epsilon = 0.2  # default value
+
+            
+            for _ in range(min(num_calls, len(candidate_pool))):
+           # Epsilon-greedy selection: with probability epsilon, choose randomly
+                if random.random() < self.epsilon:
+                    choice = random.choice(candidate_pool)
+                else:
+                    choice = max(candidate_pool, key=lambda x: x[1])
+            selected.append(choice)
+            candidate_pool.remove(choice)
+            # Update the last call tick whenever a call is made
+            self.last_call_tick = self.model.tick
+                
             for candidate, q_val in selected:
                 self.calls_human += 1
                 accepted = 0
                 confirmations = 0
+                alignment_sum = 0  
+                count = 0 
                 other = self.model.humans.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full()
@@ -477,7 +497,7 @@ class HumanAgent(Agent):
                         rep = None
                     if rep is not None:
                         for cell, reported_value in rep.items():
-                            aggregated_reports.setdefault(cell, []).append(reported_value)
+                            aggregated_reports.setdefault(cell, []).append((reported_value, candidate in self.friends))
                             old_belief = self.beliefs[cell]
                             d = abs(reported_value - old_belief)
                             P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
@@ -485,22 +505,24 @@ class HumanAgent(Agent):
                                 accepted += 1
                                 if reported_value == old_belief and self.agent_type == "exploitative":
                                     confirmations += 1
-                                    trust_boost = 0.15 if self.is_confirming else 0.1
+                                    trust_boost = 0.2 if self.is_confirming else 0.15
                                     self.trust[candidate] = min(1, self.trust[candidate] + trust_boost)
                                 elif self.agent_type == "exploitative":
-                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.07)
                                 else:
-                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
                             elif self.agent_type == "exploitative":
-                                self.trust[candidate] = max(0, self.trust[candidate] - 0.02)
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
                             else:
-                                self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                                self.trust[candidate] = max(0, self.trust[candidate] - 0.03)
+                        avg_alignment = 1 - (d / 5) if count > 0 else 0.5
+                        self.ai_alignment_scores[candidate] = avg_alignment
                 accepted_counts[candidate] = (accepted, confirmations)
-                self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
+                self.Q[candidate] = (1 - self.q_parameter) * self.Q[candidate] + self.q_parameter * accepted
         else:
             candidate_pool = ai_candidates.copy()
             if candidate_pool:
-                selected = [max(candidate_pool, key=lambda x: x[1])] if random.random() >= self.lambda_parameter else [random.choice(candidate_pool)]
+                selected = [max(candidate_pool, key=lambda x: x[1])] if random.random() >= lambda_param else [random.choice(candidate_pool)]
             else:
                 selected = []
             for candidate, q_val in selected:
@@ -513,7 +535,7 @@ class HumanAgent(Agent):
                     alignment_sum = 0
                     count = 0
                     for cell, reported_value in rep.items():
-                        aggregated_reports.setdefault(cell, []).append(reported_value)
+                        aggregated_reports.setdefault(cell, []).append((reported_value, False))  # AI reports marked as non-friend
                         old_belief = self.beliefs[cell]
                         d = abs(reported_value - old_belief)
                         P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
@@ -532,32 +554,35 @@ class HumanAgent(Agent):
                         elif self.agent_type == "exploitative":
                             self.trust[candidate] = max(0, self.trust[candidate] - 0.02)
                         else:
-                            self.trust[candidate] = max(0, self.trust[candidate] - 0.05)
-                    if count > 0:
-                        current_score = self.ai_alignment_scores.get(candidate, 0.5)
-                        self.ai_alignment_scores[candidate] = (current_score * 0.9) + (0.1 * (alignment_sum / count))
-                accepted_counts[candidate] = (accepted, confirmations)
-                self.pending_relief.append((self.model.tick, candidate, accepted, confirmations))
+                            self.trust[candidate] = max(0, self.trust[candidate] - 0.1)
+                    avg_alignment = alignment_sum / count if count > 0 else 0.5
+                    self.ai_alignment_scores[candidate] = avg_alignment
+                    accepted_counts[candidate] = (accepted, confirmations)
+                self.Q[candidate] = (1 - self.q_parameter) * self.Q[candidate] + self.q_parameter * accepted
 
-        if mode_choice == "ai":
-            for cell, rep_val in aggregated_reports.items():
-                self.ai_reported.setdefault(cell, []).append(rep_val)
-
+        # Belief updates with friend weighting
         if self.agent_type == "exploitative":
             for cell, reports in aggregated_reports.items():
-                avg_report = sum(reports) / len(reports)
+                friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
+                other_reports = [r[0] for r in reports if isinstance(r, tuple) and not r[1]]
+                avg_report = (0.8 * (sum(friend_reports) / len(friend_reports) if friend_reports else 0) + 
+                          0.2 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
                 current_value = self.beliefs[cell]
                 difference = avg_report - current_value
                 scaling = 1 + 0.3 * (len(reports) - 1) if self.is_confirming else 1 + 0.2 * (len(reports) - 1)
                 self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
         else:
-            if aggregated_reports:
-                for cell, reports in aggregated_reports.items():
-                    avg_report = sum(reports) / len(reports)
-                    current_value = self.beliefs[cell]
-                    difference = avg_report - current_value
-                    scaling = 0.5 if any(r[1] is not None and r[1].startswith("H_") for r in self.pending_relief) else 1.0  # Check for None
-                    self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
+            for cell, reports in aggregated_reports.items():
+                friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
+                other_reports = [r[0] for r in reports if isinstance(r, tuple) and not r[1]]
+                avg_report = (0.6 * (sum(friend_reports) / len(friend_reports) if friend_reports else 0) + 
+                          0.4 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
+                current_value = self.beliefs[cell]
+                difference = avg_report - current_value
+                scaling = 0.5 if any(isinstance(r, tuple) and r[1] for r in reports) else 1.0
+                self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
+
+        self.pending_relief.extend([(self.model.tick, cand, accepted_counts[cand][0], accepted_counts[cand][1]) for cand in accepted_counts])
     
     def update_delayed_beliefs(self):
         new_buffer = []
@@ -575,39 +600,81 @@ class HumanAgent(Agent):
 
 
     def send_relief(self):
-        # Define tokens based on agent type
-        self.tokens = 5  # Assuming each agent starts with 5 tokens per step; adjust if stored elsewhere
-        tokens_to_send = self.tokens * 0.5 if self.agent_type == "exploitative" else self.tokens * 0.35
+        self.tokens = 10
+        tokens_to_send = self.tokens * 0.7 if self.agent_type == "exploitative" else self.tokens * 0.3
 
-        # Determine target cells
         if self.agent_type == "exploitative":
-            cells = self.model.grid.get_neighborhood(self.pos, moore=True, radius=1, include_center=True)
+            raw_cells = self.model.grid.get_neighborhood(self.pos, moore=True, radius=2, include_center=True)
+            # Force each cell into a tuple of ints and remove duplicates manually.
+            cells = []
+            for cell in raw_cells:
+                # Convert each coordinate to an int and form a tuple.
+                cell_t = tuple(int(v) for v in cell)
+                if cell_t not in cells:
+                    cells.append(cell_t)
         else:
             height, width = self.model.disaster_grid.shape
             cells = [(x, y) for x in range(width) for y in range(height)]
+        
 
-        # Friend positions for scoring
         friend_positions = {self.model.humans[friend_id].pos for friend_id in self.friends if friend_id in self.model.humans}
 
-        # Score cells based on beliefs and friend proximity
         def cell_score(cell):
             x, y = cell
-            score = self.beliefs.get(cell, 0)
+            belief = self.beliefs.get(cell, 0)
+            # Base score from belief
+            score = belief
+            # Add epicenter weight (the closer to the epicenter, the higher the bonus)
+            dist_to_epicenter = np.sqrt((x - self.model.epicenter[0])**2 + (y - self.model.epicenter[1])**2)
+            epicenter_weight = max(0, 5 - dist_to_epicenter / 10)
+            score += epicenter_weight
+            # Friend bonus remains
+            friend_positions = {self.model.humans[friend_id].pos for friend_id in self.friends if friend_id in self.model.humans}
             if cell in friend_positions:
-                score += 1
+                score += 0.5
+            # Diversity penalty: penalize cells with many tokens already delivered this tick
+            existing_tokens = self.model.tokens_this_tick.get(cell, 0)
+            diversity_penalty = existing_tokens * 0.5  # adjust the multiplier as needed
+            score -= diversity_penalty
             return score
 
-        # Select cells to send tokens to
-        sorted_cells = sorted(cells, key=cell_score, reverse=True)
-        num_cells_to_send = min(int(tokens_to_send), len(sorted_cells))  # Tokens as float, convert to int
-        selected = [c for c in sorted_cells if cell_score(c) >= 3][:num_cells_to_send]
+        # Compute candidate scores for all cells
+        candidate_scores = [(cell, cell_score(cell)) for cell in cells]
+        # Ensure non-negative weights by shifting if necessary
+        min_score = min(score for _, score in candidate_scores)
+        adjusted_scores = [score - min_score + 0.1 for _, score in candidate_scores]  # +0.1 to avoid zeros
+        total_score = sum(adjusted_scores)
+        probabilities = [score / total_score for score in adjusted_scores]
 
-        # Send tokens and record in pending_relief
+        # Create a candidate list of standard Python tuples.
+        candidate_list = [tuple(cell) for cell, _ in candidate_scores]
+
+        # Manually build a 1D numpy array of objects.
+        candidate_cells = np.empty(len(candidate_list), dtype=object)
+        for i, cell in enumerate(candidate_list):
+            candidate_cells[i] = cell
+
+        num_cells_to_send = min(int(tokens_to_send), len(candidate_scores))
+
+        probabilities = np.array(probabilities)
+
+   #     debugging code
+#print("Candidate cells shape:", candidate_cells.shape)
+    #    print("Probabilities shape:", probabilities.shape)
+     #   assert candidate_cells.shape[0] == probabilities.shape[0], "Mismatch between candidate cells and probabilities lengths"
+
+        selected = np.random.choice(
+            candidate_cells,
+            size=num_cells_to_send,
+            replace=False,
+            p=probabilities
+        )
+
+
         for cell in selected:
             self.pending_relief.append((self.model.tick, None, 0, 0, cell))
             self.model.tokens_this_tick[cell] = self.model.tokens_this_tick.get(cell, 0) + 1
-        self.tokens -= num_cells_to_send  # Deduct integer number of tokens sent
-    
+        self.tokens -= num_cells_to_send
     
     def process_relief_actions(self, current_tick, disaster_grid):
         
@@ -836,14 +903,14 @@ if __name__ == "__main__":
     # Exploitative heatmap
     plt.subplot(1, 2, 1)
     plt.imshow(exploit_token_grid, cmap="Blues", interpolation="nearest")
-    plt.scatter(model.epicenter[0], model.epicenter[1], c="red", marker="x", s=100, label="Epicenter")
+    plt.scatter(model.epicenter[1], model.epicenter[0], c="red", marker="x", s=100, label="Epicenter")
     plt.title("Exploitative Token Distribution")
     plt.colorbar(label="Total Tokens Sent")
     plt.legend()
     # Exploratory heatmap
     plt.subplot(1, 2, 2)
     plt.imshow(explor_token_grid, cmap="Greens", interpolation="nearest")
-    plt.scatter(model.epicenter[0], model.epicenter[1], c="red", marker="x", s=100, label="Epicenter")
+    plt.scatter(model.epicenter[1], model.epicenter[0], c="red", marker="x", s=100, label="Epicenter")
     plt.title("Exploratory Token Distribution")
     plt.colorbar(label="Total Tokens Sent")
     plt.legend()
@@ -929,16 +996,37 @@ if __name__ == "__main__":
     plt.legend()
     plt.show()
 
-    # Correlation Plot
+    # Correlation Plot with Significance
     ticks_range = [d[0] for d in model.correlation_data]
     corr_exp = [d[1] for d in model.correlation_data]
     corr_expl = [d[2] for d in model.correlation_data]
+    p_exp = [d[3] for d in model.correlation_data]
+    p_expl = [d[4] for d in model.correlation_data]
+    
     plt.figure(figsize=(10, 6))
     plt.plot(ticks_range, corr_exp, label="Correlation SECI-AECI: Exploitative", color="blue")
     plt.plot(ticks_range, corr_expl, label="Correlation SECI-AECI: Exploratory", color="green")
+    
+    # Shade significant regions (p < 0.05)
+    for i in range(len(ticks_range)):
+        if p_exp[i] < 0.05:
+            plt.axvspan(ticks_range[i] - 0.5, ticks_range[i] + 0.5, color="blue", alpha=0.1)
+        if p_expl[i] < 0.05:
+            plt.axvspan(ticks_range[i] - 0.5, ticks_range[i] + 0.5, color="green", alpha=0.1)
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        plt.Line2D([0], [0], color="blue", label="Correlation SECI-AECI: Exploitative"),
+        plt.Line2D([0], [0], color="green", label="Correlation SECI-AECI: Exploratory"),
+        Patch(facecolor="blue", alpha=0.1, label="Exploitative Significant (p < 0.05)"),
+        Patch(facecolor="green", alpha=0.1, label="Exploratory Significant (p < 0.05)")
+    ]
+    plt.legend(handles=legend_elements, loc="best")
+    
+    
     plt.xlabel("Tick")
     plt.ylabel("Correlation Coefficient")
-    plt.title("Evolution of SECI-AECI Correlation")
+    plt.title("Evolution of SECI-AECI Correlation\n(Shaded: p < 0.05)")
     plt.legend()
     plt.show()
 
