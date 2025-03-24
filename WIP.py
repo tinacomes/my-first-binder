@@ -867,7 +867,6 @@ class AIAgent(Agent):
 
         ##################### Simulations #########
 
-
 def run_simulation(params):
     model = DisasterModel(
         share_exploitative=params.get("share_exploitative", 0.5),
@@ -880,7 +879,7 @@ def run_simulation(params):
         shock_probability=params.get("shock_probability", 0.1),
         shock_magnitude=params.get("shock_magnitude", 2),
         trust_update_mode=params.get("trust_update_mode", "average"),
-        ai_alignment_level=params["ai_alignment_level"],  # required
+        ai_alignment_level=params["ai_alignment_level"],
         exploitative_correction_factor=params.get("exploitative_correction_factor", 1.0),
         width=params.get("width", 50),
         height=params.get("height", 50),
@@ -893,77 +892,84 @@ def run_simulation(params):
         model.step()
     return model
 
-def run_multiple_simulations(num_runs, base_params):
-    # Lists to collect time-series data from each simulation run.
-    trust_runs = []    # We'll assume trust_data is a list of tuples: (tick, exp_AI, expl_AI, exp_friend, exp_nonfriend, expl_friend, expl_nonfriend)
-    seci_runs = []     # Each element: (tick, exp_SECI, expl_SECI)
-    aeci_runs = []     # Each element: (tick, exp_AECI, expl_AECI)
-    # Also collect final assistance values (cumulative tokens delivered).
-    assist_exploit = []
-    assist_explor = []
-    assist_incorrect_exploit = []
-    assist_incorrect_explor = []
-
+# 3. Define the simulation generator (Step 3)
+import gc
+def simulation_generator(num_runs, base_params):
     for seed in range(num_runs):
         random.seed(seed)
         np.random.seed(seed)
         model = run_simulation(base_params)
-        # Convert time series lists to arrays.
-        trust_runs.append(np.array(model.trust_data))  # shape: (ticks, 7)
-        seci_runs.append(np.array(model.seci_data))      # shape: (ticks, 3)
-        aeci_runs.append(np.array(model.aeci_data))      # shape: (ticks, 3)
-        # For assistance, sum over the entire grid (final values).
-        total_exploit = sum(model.assistance_exploit.values())
-        total_explor = sum(model.assistance_explor.values())
-        total_incorrect_exploit = sum(model.assistance_incorrect_exploit.values())
-        total_incorrect_explor = sum(model.assistance_incorrect_explor.values())
-        assist_exploit.append(total_exploit)
-        assist_explor.append(total_explor)
-        assist_incorrect_exploit.append(total_incorrect_exploit)
-        assist_incorrect_explor.append(total_incorrect_explor)
+        result = {
+            "trust": np.array(model.trust_data),
+            "seci": np.array(model.seci_data),
+            "aeci": np.array(model.aeci_data),
+            "assist_exploit": sum(model.assistance_exploit.values()),
+            "assist_explor": sum(model.assistance_explor.values()),
+            "assist_incorrect_exploit": sum(model.assistance_incorrect_exploit.values()),
+            "assist_incorrect_explor": sum(model.assistance_incorrect_explor.values())
+        }
+        yield result
+        del model
+        gc.collect()
 
-    # Stack time series arrays along a new dimension: shape (num_runs, ticks, data_columns)
-    trust_runs = np.stack(trust_runs, axis=0)
-    seci_runs = np.stack(seci_runs, axis=0)
-    aeci_runs = np.stack(aeci_runs, axis=0)
-
-    # Compute mean, 25th and 75th percentiles over runs for each tick.
-    trust_mean = np.mean(trust_runs, axis=0)
-    trust_lower = np.percentile(trust_runs, 25, axis=0)
-    trust_upper = np.percentile(trust_runs, 75, axis=0)
-
-    seci_mean = np.mean(seci_runs, axis=0)
-    seci_lower = np.percentile(seci_runs, 25, axis=0)
-    seci_upper = np.percentile(seci_runs, 75, axis=0)
-
-    aeci_mean = np.mean(aeci_runs, axis=0)
-    aeci_lower = np.percentile(aeci_runs, 25, axis=0)
-    aeci_upper = np.percentile(aeci_runs, 75, axis=0)
-
-    # Also compute summary stats for assistance as final numbers.
+# 4. Define the aggregation function (Step 4)
+def aggregate_simulation_results(num_runs, base_params):
+    trust_list = []
+    seci_list = []
+    aeci_list = []
+    assist_exploit_list = []
+    assist_explor_list = []
+    assist_incorrect_exploit_list = []
+    assist_incorrect_explor_list = []
+    
+    for result in simulation_generator(num_runs, base_params):
+        trust_list.append(result["trust"])
+        seci_list.append(result["seci"])
+        aeci_list.append(result["aeci"])
+        assist_exploit_list.append(result["assist_exploit"])
+        assist_explor_list.append(result["assist_explor"])
+        assist_incorrect_exploit_list.append(result["assist_incorrect_exploit"])
+        assist_incorrect_explor_list.append(result["assist_incorrect_explor"])
+    
+    trust_array = np.stack(trust_list, axis=0)
+    seci_array = np.stack(seci_list, axis=0)
+    aeci_array = np.stack(aeci_list, axis=0)
+    
+    trust_mean = np.mean(trust_array, axis=0)
+    trust_lower = np.percentile(trust_array, 25, axis=0)
+    trust_upper = np.percentile(trust_array, 75, axis=0)
+    
+    seci_mean = np.mean(seci_array, axis=0)
+    seci_lower = np.percentile(seci_array, 25, axis=0)
+    seci_upper = np.percentile(seci_array, 75, axis=0)
+    
+    aeci_mean = np.mean(aeci_array, axis=0)
+    aeci_lower = np.percentile(aeci_array, 25, axis=0)
+    aeci_upper = np.percentile(aeci_array, 75, axis=0)
+    
     assist_stats = {
         "exploit": {
-            "mean": np.mean(assist_exploit),
-            "lower": np.percentile(assist_exploit, 25),
-            "upper": np.percentile(assist_exploit, 75)
+            "mean": np.mean(assist_exploit_list),
+            "lower": np.percentile(assist_exploit_list, 25),
+            "upper": np.percentile(assist_exploit_list, 75)
         },
         "explor": {
-            "mean": np.mean(assist_explor),
-            "lower": np.percentile(assist_explor, 25),
-            "upper": np.percentile(assist_explor, 75)
+            "mean": np.mean(assist_explor_list),
+            "lower": np.percentile(assist_explor_list, 25),
+            "upper": np.percentile(assist_explor_list, 75)
         },
         "incorrect_exploit": {
-            "mean": np.mean(assist_incorrect_exploit),
-            "lower": np.percentile(assist_incorrect_exploit, 25),
-            "upper": np.percentile(assist_incorrect_exploit, 75)
+            "mean": np.mean(assist_incorrect_exploit_list),
+            "lower": np.percentile(assist_incorrect_exploit_list, 25),
+            "upper": np.percentile(assist_incorrect_exploit_list, 75)
         },
         "incorrect_explor": {
-            "mean": np.mean(assist_incorrect_explor),
-            "lower": np.percentile(assist_incorrect_explor, 25),
-            "upper": np.percentile(assist_incorrect_explor, 75)
+            "mean": np.mean(assist_incorrect_explor_list),
+            "lower": np.percentile(assist_incorrect_explor_list, 25),
+            "upper": np.percentile(assist_incorrect_explor_list, 75)
         }
     }
-
+    
     return {
         "trust": {"mean": trust_mean, "lower": trust_lower, "upper": trust_upper},
         "seci": {"mean": seci_mean, "lower": seci_lower, "upper": seci_upper},
@@ -971,117 +977,138 @@ def run_multiple_simulations(num_runs, base_params):
         "assist": assist_stats
     }
 
-#########################################
-# Main: Run Simulation and Generate Outputs for Validation
-#########################################
+# 5. Set up the parameter sweep in your main block (Step 5)
+import itertools
+
 if __name__ == "__main__":
-    # Define base parameters.
-    base_params = {
-        "share_exploitative": 0.5,
-        "share_of_disaster": 0.2,
-        "initial_trust": 0.5,
-        "initial_ai_trust": 0.5,
-        "number_of_humans": 50,
-        "share_confirming": 0.5,
-        "disaster_dynamics": 2,
-        "shock_probability": 0.1,
-        "shock_magnitude": 2,
-        "trust_update_mode": "average",
-        "ai_alignment_level": 0.3,  # required parameter
-        "exploitative_correction_factor": 1.0,
-        "width": 50,
-        "height": 50,
-        "lambda_parameter": 0.5,
-        "learning_rate": 0.05,
-        "epsilon": 0.2,
-        "ticks": 150
-    }
-
-    # Run 20 simulations.
-    num_runs = 20
-    results = run_multiple_simulations(num_runs, base_params)
-
-    # --- Plot Trust Evolution ---
-    trust_mean = results["trust"]["mean"]
-    trust_lower = results["trust"]["lower"]
-    trust_upper = results["trust"]["upper"]
-    ticks = trust_mean[:, 0]  # assuming first column is tick
-
+    # Define grids for your parameters.
+    share_exploitative_grid = [0.3, 0.5, 0.7]
+    ai_alignment_grid = [0.1, 0.3, 0.5]
+    disaster_dynamics_grid = [1, 2, 3]
+    learning_rate_grid = [0.03, 0.05, 0.07]
+    epsilon_grid = [0.2, 0.3]
+    
+    # Generate all combinations.
+    param_combinations = list(itertools.product(
+        share_exploitative_grid,
+        ai_alignment_grid,
+        disaster_dynamics_grid,
+        learning_rate_grid,
+        epsilon_grid
+    ))
+    
+    print("Total parameter combinations:", len(param_combinations))
+    
+    # For demonstration, you might run a subset of combinations. 
+    # Here we use all combinations and run 20 simulations per combination.
+    results_dict = {}
+    
+    for combo in param_combinations:
+        share_exploitative_val, ai_alignment_val, disaster_dynamics_val, learning_rate_val, epsilon_val = combo
+        base_params = {
+            "share_exploitative": share_exploitative_val,
+            "share_of_disaster": 0.2,
+            "initial_trust": 0.5,
+            "initial_ai_trust": 0.5,
+            "number_of_humans": 50,
+            "share_confirming": 0.5,
+            "disaster_dynamics": disaster_dynamics_val,
+            "shock_probability": 0.1,
+            "shock_magnitude": 2,
+            "trust_update_mode": "average",
+            "ai_alignment_level": ai_alignment_val,  # required
+            "exploitative_correction_factor": 1.0,
+            "width": 50,
+            "height": 50,
+            "lambda_parameter": 0.5,
+            "learning_rate": learning_rate_val,
+            "epsilon": epsilon_val,
+            "ticks": 150
+        }
+        num_runs = 20  # number of simulations per combination
+        aggregated_results = aggregate_simulation_results(num_runs, base_params)
+        results_dict[combo] = aggregated_results
+        print("Finished combination:", combo)
+        gc.collect()  # force garbage collection
+    
+    # Now you can visualize the outcomes.
+    # (Example below: For one fixed combination, plot Trust Evolution, SECI & AECI, and Assistance Delivered.)
+    
+    # For instance, choose a combination:
+    target_combo = (0.5, 0.3, 2, 0.05, 0.2)
+    res = results_dict[target_combo]
+    
+    # Plot Trust Evolution (both exploitative and exploratory)
+    trust_mean = res["trust"]["mean"]
+    trust_lower = res["trust"]["lower"]
+    trust_upper = res["trust"]["upper"]
+    ticks = trust_mean[:, 0]
     plt.figure(figsize=(12, 6))
-
-    # Exploitative trust lines:
-    plt.plot(ticks, trust_mean[:, 1], label="Exploitative AI Trust (Mean)", color="blue", linestyle="-")
+    plt.plot(ticks, trust_mean[:, 1], label="Exploitative AI Trust", color="blue")
     plt.fill_between(ticks, trust_lower[:, 1], trust_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks, trust_mean[:, 3], label="Exploitative Friend Trust (Mean)", color="green", linestyle="-")
+    plt.plot(ticks, trust_mean[:, 3], label="Exploitative Friend Trust", color="green")
     plt.fill_between(ticks, trust_lower[:, 3], trust_upper[:, 3], color="green", alpha=0.2)
-
-    # Exploratory trust lines:
-    plt.plot(ticks, trust_mean[:, 2], label="Exploratory AI Trust (Mean)", color="red", linestyle="--")
+    plt.plot(ticks, trust_mean[:, 2], label="Exploratory AI Trust", color="red", linestyle="--")
     plt.fill_between(ticks, trust_lower[:, 2], trust_upper[:, 2], color="red", alpha=0.2)
-    plt.plot(ticks, trust_mean[:, 5], label="Exploratory Friend Trust (Mean)", color="orange", linestyle="--")
+    plt.plot(ticks, trust_mean[:, 5], label="Exploratory Friend Trust", color="orange", linestyle="--")
     plt.fill_between(ticks, trust_lower[:, 5], trust_upper[:, 5], color="orange", alpha=0.2)
-
     plt.xlabel("Tick")
     plt.ylabel("Trust")
-    plt.title("Trust Evolution (Exploitative & Exploratory Agents)")
+    plt.title("Trust Evolution (Target Combo: {})".format(target_combo))
     plt.legend()
     plt.show()
-
-    # --- Combined SECI & AECI Plot ---
-    seci_mean = results["seci"]["mean"]
-    seci_lower = results["seci"]["lower"]
-    seci_upper = results["seci"]["upper"]
-
-    aeci_mean = results["aeci"]["mean"]
-    aeci_lower = results["aeci"]["lower"]
-    aeci_upper = results["aeci"]["upper"]
-
-    ticks_seci = seci_mean[:, 0]  # assuming first column is tick
-    ticks_aeci = aeci_mean[:, 0]  # assuming first column is tick
-
+    
+    # Combined SECI & AECI Plot
+    seci_mean = res["seci"]["mean"]
+    seci_lower = res["seci"]["lower"]
+    seci_upper = res["seci"]["upper"]
+    aeci_mean = res["aeci"]["mean"]
+    aeci_lower = res["aeci"]["lower"]
+    aeci_upper = res["aeci"]["upper"]
+    ticks_seci = seci_mean[:, 0]
+    ticks_aeci = aeci_mean[:, 0]
     plt.figure(figsize=(10, 6))
-    # SECI: exploitative (column index 1) and exploratory (column index 2)
-    plt.plot(ticks_seci, seci_mean[:, 1], label="SECI: Exploitative (Mean)", color="blue", linestyle="-")
+    plt.plot(ticks_seci, seci_mean[:, 1], label="SECI Exploitative", color="blue", linestyle="-")
     plt.fill_between(ticks_seci, seci_lower[:, 1], seci_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks_seci, seci_mean[:, 2], label="SECI: Exploratory (Mean)", color="green", linestyle="-")
+    plt.plot(ticks_seci, seci_mean[:, 2], label="SECI Exploratory", color="green", linestyle="-")
     plt.fill_between(ticks_seci, seci_lower[:, 2], seci_upper[:, 2], color="green", alpha=0.2)
-    # AECI: exploitative (column index 1) and exploratory (column index 2)
-    plt.plot(ticks_aeci, aeci_mean[:, 1], label="AECI: Exploitative (Mean)", color="blue", linestyle="--")
+    plt.plot(ticks_aeci, aeci_mean[:, 1], label="AECI Exploitative", color="blue", linestyle="--")
     plt.fill_between(ticks_aeci, aeci_lower[:, 1], aeci_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks_aeci, aeci_mean[:, 2], label="AECI: Exploratory (Mean)", color="green", linestyle="--")
+    plt.plot(ticks_aeci, aeci_mean[:, 2], label="AECI Exploratory", color="green", linestyle="--")
     plt.fill_between(ticks_aeci, aeci_lower[:, 2], aeci_upper[:, 2], color="green", alpha=0.2)
     plt.xlabel("Tick")
     plt.ylabel("Index Value")
-    plt.title("Combined SECI & AECI Evolution")
+    plt.title("Combined SECI & AECI Evolution (Target Combo: {})".format(target_combo))
     plt.legend()
     plt.show()
-
-    # --- Plot Assistance Delivered (Final Totals) ---
-    assist = results["assist"]
-    # Create a bar plot with error bars for the final cumulative tokens
+    
+    # Final Assistance Delivered (Bar Plot)
+    assist = res["assist"]
     categories = ["Exploitative Correct", "Exploitative Incorrect", "Exploratory Correct", "Exploratory Incorrect"]
-    means = [assist["exploit"]["mean"],
-             assist["incorrect_exploit"]["mean"],
-             assist["explor"]["mean"],
-             assist["incorrect_explor"]["mean"]]
-    lowers = [assist["exploit"]["mean"] - assist["exploit"]["lower"],
-              assist["incorrect_exploit"]["mean"] - assist["incorrect_exploit"]["lower"],
-              assist["explor"]["mean"] - assist["explor"]["lower"],
-              assist["incorrect_explor"]["mean"] - assist["incorrect_explor"]["lower"]]
-    uppers = [assist["exploit"]["upper"] - assist["exploit"]["mean"],
-              assist["incorrect_exploit"]["upper"] - assist["incorrect_exploit"]["mean"],
-              assist["explor"]["upper"] - assist["explor"]["mean"],
-              assist["incorrect_explor"]["upper"] - assist["incorrect_explor"]["mean"]]
-
+    means = [
+        assist["exploit"]["mean"],
+        assist["incorrect_exploit"]["mean"],
+        assist["explor"]["mean"],
+        assist["incorrect_explor"]["mean"]
+    ]
+    lowers = [
+        assist["exploit"]["mean"] - assist["exploit"]["lower"],
+        assist["incorrect_exploit"]["mean"] - assist["incorrect_exploit"]["lower"],
+        assist["explor"]["mean"] - assist["explor"]["lower"],
+        assist["incorrect_explor"]["mean"] - assist["incorrect_explor"]["lower"]
+    ]
+    uppers = [
+        assist["exploit"]["upper"] - assist["exploit"]["mean"],
+        assist["incorrect_exploit"]["upper"] - assist["incorrect_exploit"]["mean"],
+        assist["explor"]["upper"] - assist["explor"]["mean"],
+        assist["incorrect_explor"]["upper"] - assist["incorrect_explor"]["mean"]
+    ]
     x = np.arange(len(categories))
     width_bar = 0.5
-
     plt.figure(figsize=(8, 6))
-    plt.bar(x, means, width=width_bar, yerr=[lowers, uppers], capsize=5, color=["skyblue", "coral", "lightgreen", "orchid"])
+    plt.bar(x, means, width=width_bar, yerr=[lowers, uppers], capsize=5,
+            color=["skyblue", "coral", "lightgreen", "orchid"])
     plt.xticks(x, categories)
     plt.ylabel("Total Tokens Delivered")
-    plt.title("Final Assistance Delivered (Mean and 25th-75th Percentiles)")
+    plt.title("Final Assistance Delivered (Target Combo: {})".format(target_combo))
     plt.show()
-
-
-
