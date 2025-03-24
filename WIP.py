@@ -28,7 +28,9 @@ class DisasterModel(Model):
                  ai_alignment_level=0.3,      # ai alignment
                  exploitative_correction_factor=1.0,  # (Not used further)
                  width=50, height=50,
-                 lambda_parameter=0.5):
+                 lambda_parameter=0.5,
+                 learning_rate=0.05,
+                 epsilon=0.2):
         super().__init__()
         self.share_exploitative = share_exploitative
         self.share_of_disaster = share_of_disaster
@@ -362,7 +364,7 @@ class HumanAgent(Agent):
         self.Q = {}
         self.q_parameter = 0.95
         self.lambda_parameter = 0.5
-        self.learning_rate = 0.05
+        self.learning_rate = learning_rate  
         self.calls_human = 0
         self.calls_ai = 0
         self.total_reward = 0
@@ -372,7 +374,7 @@ class HumanAgent(Agent):
         self.ai_alignment_scores = {}
         width, height = self.model.grid.width, self.model.grid.height
         self.beliefs = {(x, y): 0 for x in range(width) for y in range(height)}
-        self.epsilon = 0.2         # initial exploration probability
+        self.epsilon = epsilon         # initial exploration probability
         self.last_call_tick = 0    # track tick of the last call
         self.last_human_call_tick = 0 #track last call to human
 
@@ -857,31 +859,63 @@ class AIAgent(Agent):
     def step(self):
         self.sense_environment()
 
+        ##################### Simulations #########
+        
+    def run_simulation(params):
+        model = DisasterModel(
+            share_exploitative=params.get("share_exploitative", 0.5),
+            share_of_disaster=params.get("share_of_disaster", 0.2),
+            initial_trust=params.get("initial_trust", 0.5),
+            initial_ai_trust=params.get("initial_ai_trust", 0.5),
+            number_of_humans=params.get("number_of_humans", 50),
+            share_confirming=params.get("share_confirming", 0.5),
+            disaster_dynamics=params.get("disaster_dynamics", 2),
+            shock_probability=params.get("shock_probability", 0.1),
+            shock_magnitude=params.get("shock_magnitude", 2),
+            trust_update_mode=params.get("trust_update_mode", "average"),
+            ai_alignment_level=params["ai_alignment_level"],  # required parameter
+            exploitative_correction_factor=params.get("exploitative_correction_factor", 1.0),
+            width=params.get("width", 50),
+            height=params.get("height", 50),
+            lambda_parameter=params.get("lambda_parameter", 0.5),
+            learning_rate=params.get("learning_rate", 0.05),
+            epsilon=params.get("epsilon", 0.2)
+        )
+        ticks = params.get("ticks", 150)
+        for i in range(ticks):
+            model.step()
+        return model
+
+
 #########################################
 # Main: Run Simulation and Generate Outputs for Validation
 #########################################
 if __name__ == "__main__":
-    share_exploitative = 0.5
-    share_of_disaster = 0.2
-    initial_trust = 0.5
-    initial_ai_trust = 0.5
-    number_of_humans = 50
-    share_confirming = 0.5
-    disaster_dynamics = 2
-    shock_probability = 0.1
-    shock_magnitude = 2
-    trust_update_mode = "average"
-    exploitative_correction_factor = 1.0
-    width = 50
-    height = 50
+    base_params = {
+        "share_exploitative": 0.5,
+        "share_of_disaster": 0.2,
+        "initial_trust": 0.5,
+        "initial_ai_trust": 0.5,
+        "number_of_humans": 50,
+        "share_confirming": 0.5,
+        "disaster_dynamics": 2,
+        "shock_probability": 0.1,
+        "shock_magnitude": 2,
+        "trust_update_mode": "average",
+        "ai_alignment_level": 0.3,   # this can be varied
+        "exploitative_correction_factor": 1.0,
+        "width": 50,
+        "height": 50,
+        "lambda_parameter": 0.5,
+        "learning_rate": 0.05,
+        "epsilon": 0.2,
+        "ticks": 150
+    }
     
+    # Run one simulation (or loop over parameter variations)
+    model = run_simulation(base_params)
 
-    ticks = 150
-    model = DisasterModel(share_exploitative, share_of_disaster, initial_trust, initial_ai_trust,
-                          number_of_humans, share_confirming, disaster_dynamics, shock_probability, shock_magnitude,
-                          trust_update_mode, exploitative_correction_factor, width, height)
-    for i in range(ticks):
-        model.step()
+
 
     # Visual 1: Histogram of tokens delivered to cells in need (level >= 4) by agent type.
     height, width = model.disaster_grid.shape
@@ -1028,29 +1062,28 @@ if __name__ == "__main__":
     plt.show()
 
 
-    # SECI plot
-    ticks_range = [d[0] for d in model.seci_data]
+     # Combine SECI and AECI in one plot
+    ticks_range_seci = [d[0] for d in model.seci_data]
     seci_exp = [d[1] for d in model.seci_data]
     seci_expl = [d[2] for d in model.seci_data]
-    plt.figure(figsize=(10, 6))
-    plt.plot(ticks_range, seci_exp, label="SECI: Exploitative", color="blue")
-    plt.plot(ticks_range, seci_expl, label="SECI: Exploratory", color="green")
-    plt.xlabel("Tick")
-    plt.ylabel("Social Echo Chamber Index")
-    plt.title("Echo Chamber Effect Within Friend Groups")
-    plt.legend()
-    plt.show()
 
-    # AECI Plot
-    ticks_range = [d[0] for d in model.aeci_data]
+    ticks_range_aeci = [d[0] for d in model.aeci_data]
     aeci_exp = [d[1] for d in model.aeci_data]
     aeci_expl = [d[2] for d in model.aeci_data]
+
     plt.figure(figsize=(10, 6))
-    plt.plot(ticks_range, aeci_exp, label="AECI: Exploitative", color="blue")
-    plt.plot(ticks_range, aeci_expl, label="AECI: Exploratory", color="green")
+
+    # SECI lines (solid)
+    plt.plot(ticks_range_seci, seci_exp, label="SECI: Exploitative", color="blue", linestyle="-")
+    plt.plot(ticks_range_seci, seci_expl, label="SECI: Exploratory", color="green", linestyle="-")
+
+    # AECI lines (dashed)
+    plt.plot(ticks_range_aeci, aeci_exp, label="AECI: Exploitative", color="blue", linestyle="--")
+    plt.plot(ticks_range_aeci, aeci_expl, label="AECI: Exploratory", color="green", linestyle="--")
+
     plt.xlabel("Tick")
-    plt.ylabel("AI Echo Chamber Index")
-    plt.title("Echo Chamber Effect with AI")
+    plt.ylabel("Index Value")
+    plt.title("Combined SECI & AECI (Exploitative & Exploratory)")
     plt.legend()
     plt.show()
 
