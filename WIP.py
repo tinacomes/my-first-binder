@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import scipy.stats as stats
+        
+
 
 from mesa import Agent, Model
 from mesa.space import MultiGrid
@@ -48,6 +50,8 @@ class DisasterModel(Model):
         self.exploitative_correction_factor = exploitative_correction_factor
         self.ai_alignment_level = ai_alignment_level
         self.lambda_parameter = lambda_parameter
+        self.learning_rate = learning_rate
+        self.epsilon = epsilon
 
         self.grid = MultiGrid(width, height, torus=False)
         self.schedule = RandomActivation(self)
@@ -90,7 +94,8 @@ class DisasterModel(Model):
         self.humans = {}
         for i in range(self.num_humans):
             agent_type = "exploitative" if random.random() < self.share_exploitative else "exploratory"
-            a = HumanAgent(unique_id=f"H_{i}", model=self, id_num=i, agent_type=agent_type, share_confirming=self.share_confirming)
+            a = HumanAgent(unique_id=f"H_{i}", model=self, id_num=i, agent_type=agent_type, share_confirming=self.share_confirming, learning_rate=self.learning_rate, epsilon=self.epsilon)
+
             self.humans[f"H_{i}"] = a
             self.schedule.add(a)
             x = random.randrange(width)
@@ -340,7 +345,8 @@ class DisasterModel(Model):
 # Agent Definitions
 #########################################
 class HumanAgent(Agent):
-    def __init__(self, unique_id, model, id_num, agent_type, share_confirming):
+    def __init__(self, unique_id, model, id_num, agent_type, share_confirming, learning_rate=0.05, epsilon=0.2):
+      
         super().__init__(model)
         self.unique_id = unique_id
         self.model = model
@@ -860,37 +866,116 @@ class AIAgent(Agent):
         self.sense_environment()
 
         ##################### Simulations #########
-        
-    def run_simulation(params):
-        model = DisasterModel(
-            share_exploitative=params.get("share_exploitative", 0.5),
-            share_of_disaster=params.get("share_of_disaster", 0.2),
-            initial_trust=params.get("initial_trust", 0.5),
-            initial_ai_trust=params.get("initial_ai_trust", 0.5),
-            number_of_humans=params.get("number_of_humans", 50),
-            share_confirming=params.get("share_confirming", 0.5),
-            disaster_dynamics=params.get("disaster_dynamics", 2),
-            shock_probability=params.get("shock_probability", 0.1),
-            shock_magnitude=params.get("shock_magnitude", 2),
-            trust_update_mode=params.get("trust_update_mode", "average"),
-            ai_alignment_level=params["ai_alignment_level"],  # required parameter
-            exploitative_correction_factor=params.get("exploitative_correction_factor", 1.0),
-            width=params.get("width", 50),
-            height=params.get("height", 50),
-            lambda_parameter=params.get("lambda_parameter", 0.5),
-            learning_rate=params.get("learning_rate", 0.05),
-            epsilon=params.get("epsilon", 0.2)
-        )
-        ticks = params.get("ticks", 150)
-        for i in range(ticks):
-            model.step()
-        return model
 
+
+def run_simulation(params):
+    model = DisasterModel(
+        share_exploitative=params.get("share_exploitative", 0.5),
+        share_of_disaster=params.get("share_of_disaster", 0.2),
+        initial_trust=params.get("initial_trust", 0.5),
+        initial_ai_trust=params.get("initial_ai_trust", 0.5),
+        number_of_humans=params.get("number_of_humans", 50),
+        share_confirming=params.get("share_confirming", 0.5),
+        disaster_dynamics=params.get("disaster_dynamics", 2),
+        shock_probability=params.get("shock_probability", 0.1),
+        shock_magnitude=params.get("shock_magnitude", 2),
+        trust_update_mode=params.get("trust_update_mode", "average"),
+        ai_alignment_level=params["ai_alignment_level"],  # required
+        exploitative_correction_factor=params.get("exploitative_correction_factor", 1.0),
+        width=params.get("width", 50),
+        height=params.get("height", 50),
+        lambda_parameter=params.get("lambda_parameter", 0.5),
+        learning_rate=params.get("learning_rate", 0.05),
+        epsilon=params.get("epsilon", 0.2)
+    )
+    ticks = params.get("ticks", 150)
+    for _ in range(ticks):
+        model.step()
+    return model
+
+def run_multiple_simulations(num_runs, base_params):
+    # Lists to collect time-series data from each simulation run.
+    trust_runs = []    # We'll assume trust_data is a list of tuples: (tick, exp_AI, expl_AI, exp_friend, exp_nonfriend, expl_friend, expl_nonfriend)
+    seci_runs = []     # Each element: (tick, exp_SECI, expl_SECI)
+    aeci_runs = []     # Each element: (tick, exp_AECI, expl_AECI)
+    # Also collect final assistance values (cumulative tokens delivered).
+    assist_exploit = []
+    assist_explor = []
+    assist_incorrect_exploit = []
+    assist_incorrect_explor = []
+
+    for seed in range(num_runs):
+        random.seed(seed)
+        np.random.seed(seed)
+        model = run_simulation(base_params)
+        # Convert time series lists to arrays.
+        trust_runs.append(np.array(model.trust_data))  # shape: (ticks, 7)
+        seci_runs.append(np.array(model.seci_data))      # shape: (ticks, 3)
+        aeci_runs.append(np.array(model.aeci_data))      # shape: (ticks, 3)
+        # For assistance, sum over the entire grid (final values).
+        total_exploit = sum(model.assistance_exploit.values())
+        total_explor = sum(model.assistance_explor.values())
+        total_incorrect_exploit = sum(model.assistance_incorrect_exploit.values())
+        total_incorrect_explor = sum(model.assistance_incorrect_explor.values())
+        assist_exploit.append(total_exploit)
+        assist_explor.append(total_explor)
+        assist_incorrect_exploit.append(total_incorrect_exploit)
+        assist_incorrect_explor.append(total_incorrect_explor)
+
+    # Stack time series arrays along a new dimension: shape (num_runs, ticks, data_columns)
+    trust_runs = np.stack(trust_runs, axis=0)
+    seci_runs = np.stack(seci_runs, axis=0)
+    aeci_runs = np.stack(aeci_runs, axis=0)
+
+    # Compute mean, 25th and 75th percentiles over runs for each tick.
+    trust_mean = np.mean(trust_runs, axis=0)
+    trust_lower = np.percentile(trust_runs, 25, axis=0)
+    trust_upper = np.percentile(trust_runs, 75, axis=0)
+
+    seci_mean = np.mean(seci_runs, axis=0)
+    seci_lower = np.percentile(seci_runs, 25, axis=0)
+    seci_upper = np.percentile(seci_runs, 75, axis=0)
+
+    aeci_mean = np.mean(aeci_runs, axis=0)
+    aeci_lower = np.percentile(aeci_runs, 25, axis=0)
+    aeci_upper = np.percentile(aeci_runs, 75, axis=0)
+
+    # Also compute summary stats for assistance as final numbers.
+    assist_stats = {
+        "exploit": {
+            "mean": np.mean(assist_exploit),
+            "lower": np.percentile(assist_exploit, 25),
+            "upper": np.percentile(assist_exploit, 75)
+        },
+        "explor": {
+            "mean": np.mean(assist_explor),
+            "lower": np.percentile(assist_explor, 25),
+            "upper": np.percentile(assist_explor, 75)
+        },
+        "incorrect_exploit": {
+            "mean": np.mean(assist_incorrect_exploit),
+            "lower": np.percentile(assist_incorrect_exploit, 25),
+            "upper": np.percentile(assist_incorrect_exploit, 75)
+        },
+        "incorrect_explor": {
+            "mean": np.mean(assist_incorrect_explor),
+            "lower": np.percentile(assist_incorrect_explor, 25),
+            "upper": np.percentile(assist_incorrect_explor, 75)
+        }
+    }
+
+    return {
+        "trust": {"mean": trust_mean, "lower": trust_lower, "upper": trust_upper},
+        "seci": {"mean": seci_mean, "lower": seci_lower, "upper": seci_upper},
+        "aeci": {"mean": aeci_mean, "lower": aeci_lower, "upper": aeci_upper},
+        "assist": assist_stats
+    }
 
 #########################################
 # Main: Run Simulation and Generate Outputs for Validation
 #########################################
 if __name__ == "__main__":
+    # Define base parameters.
     base_params = {
         "share_exploitative": 0.5,
         "share_of_disaster": 0.2,
@@ -902,7 +987,7 @@ if __name__ == "__main__":
         "shock_probability": 0.1,
         "shock_magnitude": 2,
         "trust_update_mode": "average",
-        "ai_alignment_level": 0.3,   # this can be varied
+        "ai_alignment_level": 0.3,  # required parameter
         "exploitative_correction_factor": 1.0,
         "width": 50,
         "height": 50,
@@ -911,223 +996,84 @@ if __name__ == "__main__":
         "epsilon": 0.2,
         "ticks": 150
     }
-    
-    # Run one simulation (or loop over parameter variations)
-    model = run_simulation(base_params)
 
+    # Run 20 simulations.
+    num_runs = 20
+    results = run_multiple_simulations(num_runs, base_params)
 
-
-    # Visual 1: Histogram of tokens delivered to cells in need (level >= 4) by agent type.
-    height, width = model.disaster_grid.shape
-    tokens_exploit = []
-    tokens_explor = []
-    for x in range(width):
-        for y in range(height):
-            pos = (x, y)
-            level = model.disaster_grid[x, y]
-            if level >= 4:
-                tokens_exploit.append(model.assistance_exploit.get(pos, 0))
-                tokens_explor.append(model.assistance_explor.get(pos, 0))
-    max_tokens = max(max(tokens_exploit, default=0), max(tokens_explor, default=0))
-    bin_width = 50
-    if max_tokens < bin_width:
-        bins_correct = [0, bin_width]
-    else:
-        bins_correct = list(range(0, max_tokens + bin_width, bin_width))
-    plt.figure()
-    plt.hist([tokens_exploit, tokens_explor],
-             bins=bins_correct,
-             label=["Exploitative", "Exploratory"],
-             color=["skyblue", "lightgreen"],
-             edgecolor='black')
-    plt.title("Histogram: Assistance Tokens Delivered\n(to Cells in Need, Level 4 or 5)")
-    plt.xlabel("Total Tokens Delivered")
-    plt.ylabel("Number of Cells")
-    plt.legend()
-    plt.show()
-
-    # Visual 2: Histogram of tokens incorrectly delivered (cells with level <= 2).
-    tokens_incorrect_exploit = []
-    tokens_incorrect_explor = []
-    for x in range(width):
-        for y in range(height):
-            pos = (x, y)
-            level = model.disaster_grid[x, y]
-            if level <= 2:
-                tokens_incorrect_exploit.append(model.assistance_incorrect_exploit.get(pos, 0))
-                tokens_incorrect_explor.append(model.assistance_incorrect_explor.get(pos, 0))
-    max_tokens_incorrect = max(max(tokens_incorrect_exploit, default=0), max(tokens_incorrect_explor, default=0))
-    if max_tokens_incorrect < bin_width:
-        bins_incorrect = [0, bin_width]
-    else:
-        bins_incorrect = list(range(0, max_tokens_incorrect + bin_width, bin_width))
-    plt.figure()
-    plt.hist([tokens_incorrect_exploit, tokens_incorrect_explor],
-             bins=bins_incorrect,
-             label=["Exploitative (Incorrect)", "Exploratory (Incorrect)"],
-             color=["coral", "orchid"],
-             edgecolor='black')
-    plt.title("Histogram: Incorrect Assistance Tokens Delivered\n(to Cells with Level 2 or Lower)")
-    plt.xlabel("Total Tokens Delivered")
-    plt.ylabel("Number of Cells")
-    plt.legend()
-    plt.show()
-
-   
-    plt.figure()
-    plt.plot(range(len(model.unmet_needs_evolution)), model.unmet_needs_evolution, marker='o')
-    plt.title("Time Series: Unmet Needs\n(Number of Cells in Need Without Assistance)")
+    # --- Plot Trust Evolution ---
+    # Assume trust_data has columns: tick, exp_AI, expl_AI, exp_friend, exp_nonfriend, expl_friend, expl_nonfriend.
+    trust_mean = results["trust"]["mean"]
+    trust_lower = results["trust"]["lower"]
+    trust_upper = results["trust"]["upper"]
+    ticks = trust_mean[:, 0]  # first column is tick
+    # For demonstration, plot Exploitative AI Trust (column index 1) and Exploitative Friend Trust (column index 3)
+    plt.figure(figsize=(10, 5))
+    plt.plot(ticks, trust_mean[:, 1], label="Exploitative AI Trust (Mean)", color="blue")
+    plt.fill_between(ticks, trust_lower[:, 1], trust_upper[:, 1], color="blue", alpha=0.2)
+    plt.plot(ticks, trust_mean[:, 3], label="Exploitative Friend Trust (Mean)", color="green")
+    plt.fill_between(ticks, trust_lower[:, 3], trust_upper[:, 3], color="green", alpha=0.2)
     plt.xlabel("Tick")
-    plt.ylabel("Unassisted Cells (Level ≥ 4)")
-    plt.show()
-
-
-    # Visual: Heatmap of token distribution with epicenter
-    exploit_token_grid = np.zeros((height, width))
-    explor_token_grid = np.zeros((height, width))
-    for x in range(width):
-        for y in range(height):
-            pos = (x, y)
-            exploit_token_grid[x, y] = model.assistance_exploit.get(pos, 0) + model.assistance_incorrect_exploit.get(pos, 0)
-            explor_token_grid[x, y] = model.assistance_explor.get(pos, 0) + model.assistance_incorrect_explor.get(pos, 0)
-
-    plt.figure(figsize=(12, 5))
-    # Exploitative heatmap
-    plt.subplot(1, 2, 1)
-    plt.imshow(exploit_token_grid, cmap="Blues", interpolation="nearest")
-    plt.scatter(model.epicenter[1], model.epicenter[0], c="red", marker="x", s=100, label="Epicenter")
-    plt.title("Exploitative Token Distribution")
-    plt.colorbar(label="Total Tokens Sent")
-    plt.legend()
-    # Exploratory heatmap
-    plt.subplot(1, 2, 2)
-    plt.imshow(explor_token_grid, cmap="Greens", interpolation="nearest")
-    plt.scatter(model.epicenter[1], model.epicenter[0], c="red", marker="x", s=100, label="Epicenter")
-    plt.title("Exploratory Token Distribution")
-    plt.colorbar(label="Total Tokens Sent")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-    
- #   ticks_range = list(range(ticks))
-  #  exp_human_trust = [d[0] for d in model.trust_data]
-   # exp_ai_trust = [d[1] for d in model.trust_data]
-    #expl_human_trust = [d[2] for d in model.trust_data]
- #   expl_ai_trust = [d[3] for d in model.trust_data]
-  #  plt.figure()
-   # plt.plot(ticks_range, exp_human_trust, label="Exploitative: Human Trust")
-    #plt.plot(ticks_range, exp_ai_trust, label="Exploitative: AI Trust")
-#    plt.plot(ticks_range, expl_human_trust, label="Exploratory: Human Trust")
- #   plt.plot(ticks_range, expl_ai_trust, label="Exploratory: AI Trust")
-  #  plt.xlabel("Tick")
-   # plt.ylabel("Average Trust")
-    #plt.title("Trust Evolution by Agent Type")
- #   plt.legend()
-#    plt.show()
-
-    ticks_range = list(range(ticks))  # Define ticks_range here
-    calls_exp_human = [d[0]/5 for d in model.calls_data]
-    calls_exp_ai = [d[1] for d in model.calls_data]
-    calls_expl_human = [d[2]/5 for d in model.calls_data]
-    calls_expl_ai = [d[3] for d in model.calls_data]
-    plt.figure()
-    plt.plot(ticks_range, calls_exp_human, label="Exploitative: Calls to Humans")
-    plt.plot(ticks_range, calls_exp_ai, label="Exploitative: Calls to AI")
-    plt.plot(ticks_range, calls_expl_human, label="Exploratory: Calls to Humans")
-    plt.plot(ticks_range, calls_expl_ai, label="Exploratory: Calls to AI")
-    plt.xlabel("Tick")
-    plt.ylabel("Information Requests")
-    plt.title("Information Request Calls by Agent Type")
+    plt.ylabel("Trust")
+    plt.title("Trust Evolution (Exploitative Agents)")
     plt.legend()
     plt.show()
 
-    ticks_range = [d[0] for d in model.trust_data]
-    exp_ai_trust = [d[1] for d in model.trust_data]
-    expl_ai_trust = [d[2] for d in model.trust_data]
-    exp_friend_trust = [d[3] for d in model.trust_data]
-    exp_nonfriend_trust = [d[4] for d in model.trust_data]
-    expl_friend_trust = [d[5] for d in model.trust_data]
-    expl_nonfriend_trust = [d[6] for d in model.trust_data]
-    plt.figure(figsize=(12, 6))
-    plt.plot(ticks_range, exp_ai_trust, label="Exploitative: AI Trust", color="blue", linestyle="--")
-    plt.plot(ticks_range, expl_ai_trust, label="Exploratory: AI Trust", color="green", linestyle="--")
-    plt.plot(ticks_range, exp_friend_trust, label="Exploitative: Friend Trust", color="blue", linestyle="-")
-    plt.plot(ticks_range, exp_nonfriend_trust, label="Exploitative: Non-Friend Trust", color="blue", linestyle=":")
-    plt.plot(ticks_range, expl_friend_trust, label="Exploratory: Friend Trust", color="green", linestyle="-")
-    plt.plot(ticks_range, expl_nonfriend_trust, label="Exploratory: Non-Friend Trust", color="green", linestyle=":")
-    plt.xlabel("Tick")
-    plt.ylabel("Average Trust")
-    plt.title("Trust Evolution: AI, Friends, and Non-Friends by Agent Type")
-    plt.legend()
-    plt.show()
+    # --- Combined SECI & AECI Plot ---
+    seci_mean = results["seci"]["mean"]
+    seci_lower = results["seci"]["lower"]
+    seci_upper = results["seci"]["upper"]
 
+    aeci_mean = results["aeci"]["mean"]
+    aeci_lower = results["aeci"]["lower"]
+    aeci_upper = results["aeci"]["upper"]
 
-     # Combine SECI and AECI in one plot
-    ticks_range_seci = [d[0] for d in model.seci_data]
-    seci_exp = [d[1] for d in model.seci_data]
-    seci_expl = [d[2] for d in model.seci_data]
-
-    ticks_range_aeci = [d[0] for d in model.aeci_data]
-    aeci_exp = [d[1] for d in model.aeci_data]
-    aeci_expl = [d[2] for d in model.aeci_data]
+    ticks_seci = seci_mean[:, 0]  # assuming first column is tick
+    ticks_aeci = aeci_mean[:, 0]  # assuming first column is tick
 
     plt.figure(figsize=(10, 6))
-
-    # SECI lines (solid)
-    plt.plot(ticks_range_seci, seci_exp, label="SECI: Exploitative", color="blue", linestyle="-")
-    plt.plot(ticks_range_seci, seci_expl, label="SECI: Exploratory", color="green", linestyle="-")
-
-    # AECI lines (dashed)
-    plt.plot(ticks_range_aeci, aeci_exp, label="AECI: Exploitative", color="blue", linestyle="--")
-    plt.plot(ticks_range_aeci, aeci_expl, label="AECI: Exploratory", color="green", linestyle="--")
-
+    # SECI: exploitative (column index 1) and exploratory (column index 2)
+    plt.plot(ticks_seci, seci_mean[:, 1], label="SECI: Exploitative (Mean)", color="blue", linestyle="-")
+    plt.fill_between(ticks_seci, seci_lower[:, 1], seci_upper[:, 1], color="blue", alpha=0.2)
+    plt.plot(ticks_seci, seci_mean[:, 2], label="SECI: Exploratory (Mean)", color="green", linestyle="-")
+    plt.fill_between(ticks_seci, seci_lower[:, 2], seci_upper[:, 2], color="green", alpha=0.2)
+    # AECI: exploitative (column index 1) and exploratory (column index 2)
+    plt.plot(ticks_aeci, aeci_mean[:, 1], label="AECI: Exploitative (Mean)", color="blue", linestyle="--")
+    plt.fill_between(ticks_aeci, aeci_lower[:, 1], aeci_upper[:, 1], color="blue", alpha=0.2)
+    plt.plot(ticks_aeci, aeci_mean[:, 2], label="AECI: Exploratory (Mean)", color="green", linestyle="--")
+    plt.fill_between(ticks_aeci, aeci_lower[:, 2], aeci_upper[:, 2], color="green", alpha=0.2)
     plt.xlabel("Tick")
     plt.ylabel("Index Value")
-    plt.title("Combined SECI & AECI (Exploitative & Exploratory)")
+    plt.title("Combined SECI & AECI Evolution")
     plt.legend()
     plt.show()
 
-    # Correlation Plot with Significance
-    ticks_range = [d[0] for d in model.correlation_data]
-    corr_exp = [d[1] for d in model.correlation_data]
-    corr_expl = [d[2] for d in model.correlation_data]
-    p_exp = [d[3] for d in model.correlation_data]
-    p_expl = [d[4] for d in model.correlation_data]
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(ticks_range, corr_exp, label="Correlation SECI-AECI: Exploitative", color="blue")
-    plt.plot(ticks_range, corr_expl, label="Correlation SECI-AECI: Exploratory", color="green")
-    
-    # Shade significant regions (p < 0.05)
-    for i in range(len(ticks_range)):
-        if p_exp[i] < 0.05:
-            plt.axvspan(ticks_range[i] - 0.5, ticks_range[i] + 0.5, color="blue", alpha=0.1)
-        if p_expl[i] < 0.05:
-            plt.axvspan(ticks_range[i] - 0.5, ticks_range[i] + 0.5, color="green", alpha=0.1)
+    # --- Plot Assistance Delivered (Final Totals) ---
+    assist = results["assist"]
+    # Create a bar plot with error bars for the final cumulative tokens
+    categories = ["Exploitative Correct", "Exploitative Incorrect", "Exploratory Correct", "Exploratory Incorrect"]
+    means = [assist["exploit"]["mean"],
+             assist["incorrect_exploit"]["mean"],
+             assist["explor"]["mean"],
+             assist["incorrect_explor"]["mean"]]
+    lowers = [assist["exploit"]["mean"] - assist["exploit"]["lower"],
+              assist["incorrect_exploit"]["mean"] - assist["incorrect_exploit"]["lower"],
+              assist["explor"]["mean"] - assist["explor"]["lower"],
+              assist["incorrect_explor"]["mean"] - assist["incorrect_explor"]["lower"]]
+    uppers = [assist["exploit"]["upper"] - assist["exploit"]["mean"],
+              assist["incorrect_exploit"]["upper"] - assist["incorrect_exploit"]["mean"],
+              assist["explor"]["upper"] - assist["explor"]["mean"],
+              assist["incorrect_explor"]["upper"] - assist["incorrect_explor"]["mean"]]
 
-    from matplotlib.patches import Patch
-    legend_elements = [
-        plt.Line2D([0], [0], color="blue", label="Correlation SECI-AECI: Exploitative"),
-        plt.Line2D([0], [0], color="green", label="Correlation SECI-AECI: Exploratory"),
-        Patch(facecolor="blue", alpha=0.1, label="Exploitative Significant (p < 0.05)"),
-        Patch(facecolor="green", alpha=0.1, label="Exploratory Significant (p < 0.05)")
-    ]
-    plt.legend(handles=legend_elements, loc="best")
-    
-    
-    plt.xlabel("Tick")
-    plt.ylabel("Correlation Coefficient")
-    plt.title("Evolution of SECI-AECI Correlation\n(Shaded: p < 0.05)")
-    plt.legend()
+    x = np.arange(len(categories))
+    width_bar = 0.5
+
+    plt.figure(figsize=(8, 6))
+    plt.bar(x, means, width=width_bar, yerr=[lowers, uppers], capsize=5, color=["skyblue", "coral", "lightgreen", "orchid"])
+    plt.xticks(x, categories)
+    plt.ylabel("Total Tokens Delivered")
+    plt.title("Final Assistance Delivered (Mean and 25th-75th Percentiles)")
     plt.show()
 
-    # Final static correlation (for reference)
-    seci_exp_vals = [d[1] for d in model.seci_data]
-    aeci_exp_vals = [d[1] for d in model.aeci_data]
-    seci_expl_vals = [d[2] for d in model.seci_data]
-    aeci_expl_vals = [d[2] for d in model.aeci_data]
-    corr_exp = np.corrcoef(seci_exp_vals, aeci_exp_vals)[0, 1] if len(seci_exp_vals) > 1 else 0
-    corr_expl = np.corrcoef(seci_expl_vals, aeci_expl_vals)[0, 1] if len(seci_expl_vals) > 1 else 0
-    print(f"Final Correlation Exploitative SECI-AECI: {corr_exp:.3f}")
-    print(f"Final Correlation Exploratory SECI-AECI: {corr_expl:.3f}")
+
 
