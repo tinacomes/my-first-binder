@@ -399,14 +399,15 @@ class HumanAgent(Agent):
             else:
                 self.beliefs[cell] = actual
 
+
     def request_information(self):
+        # Initialize candidate lists and tracking dictionaries.
         human_candidates = []
         ai_candidates = []
         accepted_counts = {}
         aggregated_reports = {}
 
         # --- Collect Candidates ---
-        # For both exploitative and exploratory agents, loop over keys in self.trust.
         if self.agent_type == "exploitative":
             all_human_candidates = []
             network_human_candidates = []
@@ -431,14 +432,12 @@ class HumanAgent(Agent):
                         self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.6) +
                                          (self.trust[candidate] * 0.4)) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
-            # Prefer network candidates if available
+            # Prefer friends (network) if available.
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
-            # Occasionally include non-network candidates
             if non_network_candidates and random.random() < 0.05:
                 human_candidates.append(random.choice(non_network_candidates))
-      
         else:
-            # Exploratory branch: use a different bonus structure.
+            # Exploratory branch: use a milder bonus structure.
             network_neighbors = set(f"H_{j}" for j in self.model.social_network.neighbors(self.id_num)
                                 if f"H_{j}" in self.model.humans)
             extended_network = set()
@@ -491,10 +490,9 @@ class HumanAgent(Agent):
 
         # --- Process Selected Candidates Based on Mode ---
         if mode_choice == "human":
-            # Update timestamp for human calls.
             self.last_human_call_tick = self.model.tick
             candidate_pool = human_candidates.copy()
-            num_calls = 5 if self.agent_type == "exploitative" else 7
+            num_calls = 5  # For exploitative agents, we set 5 calls
             selected = []
             for _ in range(min(num_calls, len(candidate_pool))):
                 if random.random() < self.epsilon:
@@ -503,19 +501,23 @@ class HumanAgent(Agent):
                     choice = max(candidate_pool, key=lambda x: x[1])
                 selected.append(choice)
                 candidate_pool.remove(choice)
-            # Process each selected human candidate.
             for candidate, q_val in selected:
                 self.calls_human += 1
                 accepted = 0
                 confirmations = 0
-                # Insert your code for obtaining information from the candidate.
-                # For example:
+                # Process candidate's information:
                 other = self.model.humans.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full()
-                    # (Optional: process rep to update trust, etc.)
+                    # (Optional: process rep and update aggregated_reports)
                 accepted_counts[candidate] = (accepted, confirmations)
+                # Boost trust more strongly for friends
+                if candidate in self.friends:
+                    boost = 0.3 if self.is_confirming else 0.25
+                else:
+                    boost = 0.1
                 self.Q[candidate] = (1 - self.q_parameter) * self.Q[candidate] + self.q_parameter * accepted
+                self.trust[candidate] = min(1, self.trust[candidate] + boost)
         else:
             candidate_pool = ai_candidates.copy()
             if candidate_pool:
@@ -531,12 +533,14 @@ class HumanAgent(Agent):
                 confirmations = 0
                 other = self.model.ais.get(candidate)
                 if other is not None:
+                    # Use a lower learning rate for AI updates
+                    learning_rate_ai = 0.02
                     rep = other.provide_information_full(self.beliefs, trust=self.trust[candidate], agent_type=self.agent_type)
                     # (Optional: process rep)
                 accepted_counts[candidate] = (accepted, confirmations)
-                self.Q[candidate] = (1 - self.q_parameter) * self.Q[candidate] + self.q_parameter * accepted
+                self.Q[candidate] = (1 - 0.02) * self.Q[candidate] + 0.02 * accepted
 
-        # --- Belief Update (using aggregated_reports) ---
+        # --- Belief Update ---
         for cell, reports in aggregated_reports.items():
             if self.agent_type == "exploitative":
                 friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
@@ -545,7 +549,7 @@ class HumanAgent(Agent):
                           0.1 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
                 current_value = self.beliefs[cell]
                 difference = avg_report - current_value
-                scaling = 1 + 0.3 * (len(reports) - 1) if self.is_confirming else 1 + 0.2 * (len(reports) - 1)
+                scaling = 1 + (0.3 if self.is_confirming else 0.2) * (len(reports) - 1)
                 self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
             else:
                 friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
@@ -601,7 +605,7 @@ class HumanAgent(Agent):
             belief = self.beliefs.get(cell, 0)
             score = belief  # initialize score with the belief
             if self.agent_type == "exploitative":
-                sigma = 10.0  # adjust sigma as needed
+                sigma = 20.0  # adjust sigma as needed
                 dist_to_epicenter = np.sqrt((x - self.model.epicenter[0])**2 + (y - self.model.epicenter[1])**2)
                 epicenter_weight = np.exp(-((dist_to_epicenter)**2) / (2 * sigma**2)) * 5
                 score += epicenter_weight
