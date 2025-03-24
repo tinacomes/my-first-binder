@@ -429,8 +429,10 @@ class HumanAgent(Agent):
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
                         coverage_bonus = 0.3  # lower bonus so AI is not dominating
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.6) +
-                                         (self.trust[candidate] * 0.4)) * self.q_parameter * coverage_bonus
+                        self.Q[candidate] = (
+                            (self.info_accuracy.get(candidate, 0.5) * 0.6) +
+                            (self.trust[candidate] * 0.4)
+                        ) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
             # Prefer friends (network) if available.
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
@@ -452,8 +454,10 @@ class HumanAgent(Agent):
                 if candidate.startswith("H_"):
                     bonus = 0.5 if candidate in network_neighbors else (0.3 if candidate in extended_network else 0.1)
                     if candidate not in self.Q:
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.5) +
-                                         (self.trust[candidate] * 0.5) + bonus) * self.q_parameter
+                        self.Q[candidate] = (
+                            (self.info_accuracy.get(candidate, 0.5) * 0.5) +
+                            (self.trust[candidate] * 0.5) + bonus
+                        ) * self.q_parameter
                     candidate_tuple = (candidate, self.Q[candidate])
                     all_human_candidates.append(candidate_tuple)
                     if candidate in network_neighbors or candidate in extended_network:
@@ -463,8 +467,10 @@ class HumanAgent(Agent):
                 elif candidate.startswith("A_"):
                     if candidate not in self.Q:
                         coverage_bonus = 0.8
-                        self.Q[candidate] = ((self.info_accuracy.get(candidate, 0.5) * 0.7) +
-                                         (self.trust[candidate] * 0.3)) * self.q_parameter * coverage_bonus
+                        self.Q[candidate] = (
+                            (self.info_accuracy.get(candidate, 0.5) * 0.7) +
+                            (self.trust[candidate] * 0.3)
+                        ) * self.q_parameter * coverage_bonus
                     ai_candidates.append((candidate, self.Q[candidate]))
             human_candidates = network_human_candidates if network_human_candidates else all_human_candidates
 
@@ -490,9 +496,10 @@ class HumanAgent(Agent):
 
         # --- Process Selected Candidates Based on Mode ---
         if mode_choice == "human":
+            # Update timestamp for human calls.
             self.last_human_call_tick = self.model.tick
             candidate_pool = human_candidates.copy()
-            num_calls = 5  # For exploitative agents, we set 5 calls
+            num_calls = 5 if self.agent_type == "exploitative" else 7
             selected = []
             for _ in range(min(num_calls, len(candidate_pool))):
                 if random.random() < self.epsilon:
@@ -501,24 +508,55 @@ class HumanAgent(Agent):
                     choice = max(candidate_pool, key=lambda x: x[1])
                 selected.append(choice)
                 candidate_pool.remove(choice)
+
+            # Process each selected human candidate.
             for candidate, q_val in selected:
                 self.calls_human += 1
                 accepted = 0
                 confirmations = 0
-                # Process candidate's information:
+
+                # Get the "other" human's report
                 other = self.model.humans.get(candidate)
                 if other is not None:
                     rep = other.provide_information_full()
-                    # (Optional: process rep and update aggregated_reports)
+                    if rep is not None:
+                        # For each cell in the report, decide if we accept it
+                        for cell, reported_value in rep.items():
+                            # Store the info in aggregated_reports
+                            aggregated_reports.setdefault(cell, []).append((reported_value, candidate in self.friends))
+                            old_belief = self.beliefs[cell]
+                            d = abs(reported_value - old_belief)
+
+                            # Acceptance formula
+                            P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
+                            if random.random() < P_accept:
+                                accepted += 1
+                                # If exploitative and the reported_value matches old_belief
+                                if reported_value == old_belief and self.agent_type == "exploitative":
+                                    confirmations += 1
+                                    # Higher boost if self.is_confirming
+                                    trust_boost = 0.3 if self.is_confirming else 0.25
+                                    self.trust[candidate] = min(1, self.trust[candidate] + trust_boost)
+                                elif self.agent_type == "exploitative":
+                                    # Smaller positive update
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.1)
+                                else:
+                                    # Exploratory minor boost
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                            else:
+                                # Negative update if exploitative
+                                if self.agent_type == "exploitative":
+                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.02)
+                                else:
+                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.03)
+
+                # Store acceptance info for this candidate
                 accepted_counts[candidate] = (accepted, confirmations)
-                # Boost trust more strongly for friends
-                if candidate in self.friends:
-                    boost = 0.3 if self.is_confirming else 0.25
-                else:
-                    boost = 0.1
+                # Q-value update
                 self.Q[candidate] = (1 - self.q_parameter) * self.Q[candidate] + self.q_parameter * accepted
-                self.trust[candidate] = min(1, self.trust[candidate] + boost)
+
         else:
+            # AI branch
             candidate_pool = ai_candidates.copy()
             if candidate_pool:
                 if random.random() >= lambda_param:
@@ -527,41 +565,72 @@ class HumanAgent(Agent):
                     selected = [random.choice(candidate_pool)]
             else:
                 selected = []
+
             for candidate, q_val in selected:
                 self.calls_ai += 1
                 accepted = 0
                 confirmations = 0
+
                 other = self.model.ais.get(candidate)
                 if other is not None:
-                    # Use a lower learning rate for AI updates
-                    learning_rate_ai = 0.02
                     rep = other.provide_information_full(self.beliefs, trust=self.trust[candidate], agent_type=self.agent_type)
-                    # (Optional: process rep)
+                    if rep is not None:
+                        for cell, reported_value in rep.items():
+                            aggregated_reports.setdefault(cell, []).append((reported_value, False))  # AI is not friend
+                            old_belief = self.beliefs[cell]
+                            d = abs(reported_value - old_belief)
+                            P_accept = 1.0 if d == 0 else (self.D ** self.delta) / ((d ** self.delta) + (self.D ** self.delta))
+                            if random.random() < P_accept:
+                                accepted += 1
+                                if reported_value == old_belief and self.agent_type == "exploitative":
+                                    confirmations += 1
+                                    # Slightly bigger boost for exploitative if confirming
+                                    trust_boost = 0.15 if self.is_confirming else 0.1
+                                    self.trust[candidate] = min(1, self.trust[candidate] + trust_boost)
+                                elif self.agent_type == "exploitative":
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.05)
+                                else:
+                                    self.trust[candidate] = min(1, self.trust[candidate] + 0.03)
+                            else:
+                                # Negative update if exploitative
+                                if self.agent_type == "exploitative":
+                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.01)
+                                else:
+                                    self.trust[candidate] = max(0, self.trust[candidate] - 0.03)
+
+                # Store acceptance info
                 accepted_counts[candidate] = (accepted, confirmations)
-                self.Q[candidate] = (1 - 0.02) * self.Q[candidate] + 0.02 * accepted
+                # Lower learning rate for AI Q-values
+                learning_rate_ai = 0.02
+                self.Q[candidate] = (1 - learning_rate_ai) * self.Q[candidate] + learning_rate_ai * accepted
 
-        # --- Belief Update ---
-        for cell, reports in aggregated_reports.items():
-            if self.agent_type == "exploitative":
-                friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
-                other_reports = [r[0] for r in reports if isinstance(r, tuple) and not r[1]]
-                avg_report = (0.9 * (sum(friend_reports) / len(friend_reports) if friend_reports else 0) +
-                          0.1 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
-                current_value = self.beliefs[cell]
-                difference = avg_report - current_value
-                scaling = 1 + (0.3 if self.is_confirming else 0.2) * (len(reports) - 1)
-                self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
-            else:
-                friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
-                other_reports = [r[0] for r in reports if isinstance(r, tuple) and not r[1]]
-                avg_report = (0.7 * (sum(friend_reports) / len(friend_reports) if friend_reports else 0) +
-                          0.3 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
-                current_value = self.beliefs[cell]
-                difference = avg_report - current_value
-                scaling = 0.5 if any(isinstance(r, tuple) and r[1] for r in reports) else 1.0
-                self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
+        # --- Belief Update (using aggregated_reports) ---
+        if aggregated_reports:
+            for cell, reports in aggregated_reports.items():
+                if self.agent_type == "exploitative":
+                    friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
+                    other_reports = [r[0] for r in reports if isinstance(r, tuple) and not r[1]]
+                    avg_report = (0.9 * (sum(friend_reports) / len(friend_reports) if friend_reports else 0) +
+                              0.1 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
+                    current_value = self.beliefs[cell]
+                    difference = avg_report - current_value
+                    scaling = 1 + (0.3 if self.is_confirming else 0.2) * (len(reports) - 1)
+                    self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
+                else:
+                    friend_reports = [r[0] for r in reports if isinstance(r, tuple) and r[1]]
+                    other_reports = [r[0] for r in reports if isinstance(r, tuple) and not r[1]]
+                    avg_report = (0.7 * (sum(friend_reports) / len(friend_reports) if friend_reports else 0) +
+                              0.3 * (sum(other_reports) / len(other_reports) if other_reports else 0)) if reports else 0
+                    current_value = self.beliefs[cell]
+                    difference = avg_report - current_value
+                    scaling = 0.5 if any(isinstance(r, tuple) and r[1] for r in reports) else 1.0
+                    self.beliefs[cell] = max(0, min(5, current_value + self.learning_rate * scaling * difference))
 
-        self.pending_relief.extend([(self.model.tick, cand, accepted_counts[cand][0], accepted_counts[cand][1]) for cand in accepted_counts])
+        # Extend pending_relief with acceptance info
+        self.pending_relief.extend([
+            (self.model.tick, cand, accepted_counts[cand][0], accepted_counts[cand][1]) 
+            for cand in accepted_counts
+        ])
 
     
     def update_delayed_beliefs(self):
@@ -605,7 +674,7 @@ class HumanAgent(Agent):
             belief = self.beliefs.get(cell, 0)
             score = belief  # initialize score with the belief
             if self.agent_type == "exploitative":
-                sigma = 20.0  # adjust sigma as needed
+                sigma = 80.0  # adjust sigma as needed / smoothing 'ring' effect around epicenter
                 dist_to_epicenter = np.sqrt((x - self.model.epicenter[0])**2 + (y - self.model.epicenter[1])**2)
                 epicenter_weight = np.exp(-((dist_to_epicenter)**2) / (2 * sigma**2)) * 5
                 score += epicenter_weight
