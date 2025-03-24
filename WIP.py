@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import scipy.stats as stats
-        
+import itertools       
 
 
 from mesa import Agent, Model
@@ -865,7 +865,7 @@ class AIAgent(Agent):
     def step(self):
         self.sense_environment()
 
-        ##################### Simulations #########
+##################### Simulations #########
 
 def run_simulation(params):
     model = DisasterModel(
@@ -892,7 +892,7 @@ def run_simulation(params):
         model.step()
     return model
 
-# 3. Define the simulation generator (Step 3)
+# Define the simulation generator 
 import gc
 def simulation_generator(num_runs, base_params):
     for seed in range(num_runs):
@@ -912,7 +912,7 @@ def simulation_generator(num_runs, base_params):
         del model
         gc.collect()
 
-# 4. Define the aggregation function (Step 4)
+# Define aggregation function
 def aggregate_simulation_results(num_runs, base_params):
     trust_list = []
     seci_list = []
@@ -977,138 +977,126 @@ def aggregate_simulation_results(num_runs, base_params):
         "assist": assist_stats
     }
 
-# 5. Set up the parameter sweep in your main block (Step 5)
-import itertools
+####################################################################
+###################### Define Experiments #######################
+####################################################################
+
+##### Experiment 1: vary share of exploitative agents ######
+def experiment_share_exploitative(base_params, share_values, num_runs=20):
+    results = {}
+    for share in share_values:
+        params = base_params.copy()
+        params["share_exploitative"] = share
+        print("Running share_exploitative =", share)
+        results[share] = aggregate_simulation_results(num_runs, params)
+    return results
+
+##### Experiment 2: vary alignment level, by which AI adapts to human beliefs ######
+def experiment_ai_alignment(base_params, alignment_values, num_runs=20):
+    results = {}
+    for align in alignment_values:
+        params = base_params.copy()
+        params["ai_alignment_level"] = align
+        print("Running ai_alignment_level =", align)
+        results[align] = aggregate_simulation_results(num_runs, params)
+    return results
+
+    import itertools
+
+##### Experiment 3: vary alignment disaster dynamics ######
+def experiment_disaster_dynamics(base_params, dynamics_values, shock_values, num_runs=20):
+    results = {}
+    for dd, sm in itertools.product(dynamics_values, shock_values):
+        params = base_params.copy()
+        params["disaster_dynamics"] = dd
+        params["shock_magnitude"] = sm
+        print("Running disaster_dynamics =", dd, "shock_magnitude =", sm)
+        results[(dd, sm)] = aggregate_simulation_results(num_runs, params)
+    return results
+
+
+##### Experiment 4: vary learning and trust ######
+def experiment_learning_trust(base_params, learning_rate_values, epsilon_values, num_runs=20):
+    results = {}
+    for lr, eps in itertools.product(learning_rate_values, epsilon_values):
+        params = base_params.copy()
+        params["learning_rate"] = lr
+        params["epsilon"] = eps
+        print("Running learning_rate =", lr, "epsilon =", eps)
+        results[(lr, eps)] = aggregate_simulation_results(num_runs, params)
+    return results
+
+
+#########################################################################################
+### MAIN ####
+#########################################################################################
 
 if __name__ == "__main__":
-    # Define grids for your parameters.
-    share_exploitative_grid = [0.3, 0.5, 0.7]
-    ai_alignment_grid = [0.1, 0.3, 0.5]
-    disaster_dynamics_grid = [1, 2, 3]
-    learning_rate_grid = [0.03, 0.05, 0.07]
-    epsilon_grid = [0.2, 0.3]
+    # Define base parameters.
+    base_params = {
+        "share_exploitative": 0.5,  # default, but will be overwritten in experiment (a)
+        "share_of_disaster": 0.2,
+        "initial_trust": 0.5,
+        "initial_ai_trust": 0.5,
+        "number_of_humans": 50,
+        "share_confirming": 0.5,
+        "disaster_dynamics": 2,  # default, to be varied in experiment (c)
+        "shock_probability": 0.1,
+        "shock_magnitude": 2,    # default, to be varied in experiment (c)
+        "trust_update_mode": "average",
+        "ai_alignment_level": 0.3,  # default, to be varied in experiment (b)
+        "exploitative_correction_factor": 1.0,
+        "width": 50,
+        "height": 50,
+        "lambda_parameter": 0.5,
+        "learning_rate": 0.05,  # default, to be varied in experiment (d)
+        "epsilon": 0.2,         # default, to be varied in experiment (d)
+        "ticks": 150
+    }
     
-    # Generate all combinations.
-    param_combinations = list(itertools.product(
-        share_exploitative_grid,
-        ai_alignment_grid,
-        disaster_dynamics_grid,
-        learning_rate_grid,
-        epsilon_grid
-    ))
+    num_runs = 20  # simulations per parameter combination
+
+    ### Experiment (a): Vary share_exploitative
+    share_values = [0.3, 0.5, 0.7]
+    results_a = experiment_share_exploitative(base_params, share_values, num_runs)
+    # (Now you can plot outcomes from results_a, e.g., final assistance delivered vs. share_exploitative)
+
+    ### Experiment (b): Vary AI alignment level
+    alignment_values = [0.1, 0.3, 0.5]
+    results_b = experiment_ai_alignment(base_params, alignment_values, num_runs)
+    # (Plot outcomes vs. ai_alignment_level)
+
+    ### Experiment (c): Vary disaster dynamics and shock magnitude
+    dynamics_values = [1, 2, 3]
+    shock_values = [1, 2, 3]
+    results_c = experiment_disaster_dynamics(base_params, dynamics_values, shock_values, num_runs)
+    # (Plot outcomes vs. disaster parameters; you might create a 3D plot or multiple subplots)
+
+    ### Experiment (d): Vary learning_rate and epsilon
+    learning_rate_values = [0.03, 0.05, 0.07]
+    epsilon_values = [0.2, 0.3]
+    results_d = experiment_learning_trust(base_params, learning_rate_values, epsilon_values, num_runs)
+    # (Plot outcomes vs. learning/trust parameters)
+
+    # For each experiment you can then extract and plot your time series (trust, SECI, AECI) and final assistance values.
+    # For example, for experiment (a):
+    import matplotlib.pyplot as plt
+    shares = sorted(results_a.keys())
+    assist_exploit_means = [results_a[s]["assist"]["exploit"]["mean"] for s in shares]
+    assist_explor_means = [results_a[s]["assist"]["explor"]["mean"] for s in shares]
     
-    print("Total parameter combinations:", len(param_combinations))
-    
-    # For demonstration, you might run a subset of combinations. 
-    # Here we use all combinations and run 20 simulations per combination.
-    results_dict = {}
-    
-    for combo in param_combinations:
-        share_exploitative_val, ai_alignment_val, disaster_dynamics_val, learning_rate_val, epsilon_val = combo
-        base_params = {
-            "share_exploitative": share_exploitative_val,
-            "share_of_disaster": 0.2,
-            "initial_trust": 0.5,
-            "initial_ai_trust": 0.5,
-            "number_of_humans": 50,
-            "share_confirming": 0.5,
-            "disaster_dynamics": disaster_dynamics_val,
-            "shock_probability": 0.1,
-            "shock_magnitude": 2,
-            "trust_update_mode": "average",
-            "ai_alignment_level": ai_alignment_val,  # required
-            "exploitative_correction_factor": 1.0,
-            "width": 50,
-            "height": 50,
-            "lambda_parameter": 0.5,
-            "learning_rate": learning_rate_val,
-            "epsilon": epsilon_val,
-            "ticks": 150
-        }
-        num_runs = 20  # number of simulations per combination
-        aggregated_results = aggregate_simulation_results(num_runs, base_params)
-        results_dict[combo] = aggregated_results
-        print("Finished combination:", combo)
-        gc.collect()  # force garbage collection
-    
-    # Now you can visualize the outcomes.
-    # (Example below: For one fixed combination, plot Trust Evolution, SECI & AECI, and Assistance Delivered.)
-    
-    # For instance, choose a combination:
-    target_combo = (0.5, 0.3, 2, 0.05, 0.2)
-    res = results_dict[target_combo]
-    
-    # Plot Trust Evolution (both exploitative and exploratory)
-    trust_mean = res["trust"]["mean"]
-    trust_lower = res["trust"]["lower"]
-    trust_upper = res["trust"]["upper"]
-    ticks = trust_mean[:, 0]
-    plt.figure(figsize=(12, 6))
-    plt.plot(ticks, trust_mean[:, 1], label="Exploitative AI Trust", color="blue")
-    plt.fill_between(ticks, trust_lower[:, 1], trust_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks, trust_mean[:, 3], label="Exploitative Friend Trust", color="green")
-    plt.fill_between(ticks, trust_lower[:, 3], trust_upper[:, 3], color="green", alpha=0.2)
-    plt.plot(ticks, trust_mean[:, 2], label="Exploratory AI Trust", color="red", linestyle="--")
-    plt.fill_between(ticks, trust_lower[:, 2], trust_upper[:, 2], color="red", alpha=0.2)
-    plt.plot(ticks, trust_mean[:, 5], label="Exploratory Friend Trust", color="orange", linestyle="--")
-    plt.fill_between(ticks, trust_lower[:, 5], trust_upper[:, 5], color="orange", alpha=0.2)
-    plt.xlabel("Tick")
-    plt.ylabel("Trust")
-    plt.title("Trust Evolution (Target Combo: {})".format(target_combo))
-    plt.legend()
-    plt.show()
-    
-    # Combined SECI & AECI Plot
-    seci_mean = res["seci"]["mean"]
-    seci_lower = res["seci"]["lower"]
-    seci_upper = res["seci"]["upper"]
-    aeci_mean = res["aeci"]["mean"]
-    aeci_lower = res["aeci"]["lower"]
-    aeci_upper = res["aeci"]["upper"]
-    ticks_seci = seci_mean[:, 0]
-    ticks_aeci = aeci_mean[:, 0]
-    plt.figure(figsize=(10, 6))
-    plt.plot(ticks_seci, seci_mean[:, 1], label="SECI Exploitative", color="blue", linestyle="-")
-    plt.fill_between(ticks_seci, seci_lower[:, 1], seci_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks_seci, seci_mean[:, 2], label="SECI Exploratory", color="green", linestyle="-")
-    plt.fill_between(ticks_seci, seci_lower[:, 2], seci_upper[:, 2], color="green", alpha=0.2)
-    plt.plot(ticks_aeci, aeci_mean[:, 1], label="AECI Exploitative", color="blue", linestyle="--")
-    plt.fill_between(ticks_aeci, aeci_lower[:, 1], aeci_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks_aeci, aeci_mean[:, 2], label="AECI Exploratory", color="green", linestyle="--")
-    plt.fill_between(ticks_aeci, aeci_lower[:, 2], aeci_upper[:, 2], color="green", alpha=0.2)
-    plt.xlabel("Tick")
-    plt.ylabel("Index Value")
-    plt.title("Combined SECI & AECI Evolution (Target Combo: {})".format(target_combo))
-    plt.legend()
-    plt.show()
-    
-    # Final Assistance Delivered (Bar Plot)
-    assist = res["assist"]
-    categories = ["Exploitative Correct", "Exploitative Incorrect", "Exploratory Correct", "Exploratory Incorrect"]
-    means = [
-        assist["exploit"]["mean"],
-        assist["incorrect_exploit"]["mean"],
-        assist["explor"]["mean"],
-        assist["incorrect_explor"]["mean"]
-    ]
-    lowers = [
-        assist["exploit"]["mean"] - assist["exploit"]["lower"],
-        assist["incorrect_exploit"]["mean"] - assist["incorrect_exploit"]["lower"],
-        assist["explor"]["mean"] - assist["explor"]["lower"],
-        assist["incorrect_explor"]["mean"] - assist["incorrect_explor"]["lower"]
-    ]
-    uppers = [
-        assist["exploit"]["upper"] - assist["exploit"]["mean"],
-        assist["incorrect_exploit"]["upper"] - assist["incorrect_exploit"]["mean"],
-        assist["explor"]["upper"] - assist["explor"]["mean"],
-        assist["incorrect_explor"]["upper"] - assist["incorrect_explor"]["mean"]
-    ]
-    x = np.arange(len(categories))
-    width_bar = 0.5
     plt.figure(figsize=(8, 6))
-    plt.bar(x, means, width=width_bar, yerr=[lowers, uppers], capsize=5,
-            color=["skyblue", "coral", "lightgreen", "orchid"])
-    plt.xticks(x, categories)
-    plt.ylabel("Total Tokens Delivered")
-    plt.title("Final Assistance Delivered (Target Combo: {})".format(target_combo))
+    plt.plot(shares, assist_exploit_means, marker="o", label="Exploitative Assistance")
+    plt.plot(shares, assist_explor_means, marker="s", label="Exploratory Assistance")
+    plt.xlabel("Share Exploitative")
+    plt.ylabel("Final Total Tokens Delivered")
+    plt.title("Effect of Share Exploitative on Assistance Delivered")
+    plt.legend()
     plt.show()
+    
+    # (You can similarly produce plots for experiments (b), (c), and (d).)
+    
+    # Optionally, force garbage collection between experiments:
+    import gc
+    gc.collect()
+
