@@ -658,7 +658,7 @@ class HumanAgent(Agent):
 
     def send_relief(self):
         self.tokens = 10
-        tokens_to_send = self.tokens * 0.7 if self.agent_type == "exploitative" else self.tokens * 0.3
+        tokens_to_send = self.tokens * 0.7 if self.agent_type == "exploitative" else self.tokens * 0.7
 
         if self.agent_type == "exploitative":
             raw_cells = self.model.grid.get_neighborhood(self.pos, moore=True, radius=2, include_center=True)
@@ -1002,20 +1002,28 @@ if __name__ == "__main__":
     results = run_multiple_simulations(num_runs, base_params)
 
     # --- Plot Trust Evolution ---
-    # Assume trust_data has columns: tick, exp_AI, expl_AI, exp_friend, exp_nonfriend, expl_friend, expl_nonfriend.
     trust_mean = results["trust"]["mean"]
     trust_lower = results["trust"]["lower"]
     trust_upper = results["trust"]["upper"]
-    ticks = trust_mean[:, 0]  # first column is tick
-    # For demonstration, plot Exploitative AI Trust (column index 1) and Exploitative Friend Trust (column index 3)
-    plt.figure(figsize=(10, 5))
-    plt.plot(ticks, trust_mean[:, 1], label="Exploitative AI Trust (Mean)", color="blue")
+    ticks = trust_mean[:, 0]  # assuming first column is tick
+
+    plt.figure(figsize=(12, 6))
+
+    # Exploitative trust lines:
+    plt.plot(ticks, trust_mean[:, 1], label="Exploitative AI Trust (Mean)", color="blue", linestyle="-")
     plt.fill_between(ticks, trust_lower[:, 1], trust_upper[:, 1], color="blue", alpha=0.2)
-    plt.plot(ticks, trust_mean[:, 3], label="Exploitative Friend Trust (Mean)", color="green")
+    plt.plot(ticks, trust_mean[:, 3], label="Exploitative Friend Trust (Mean)", color="green", linestyle="-")
     plt.fill_between(ticks, trust_lower[:, 3], trust_upper[:, 3], color="green", alpha=0.2)
+
+    # Exploratory trust lines:
+    plt.plot(ticks, trust_mean[:, 2], label="Exploratory AI Trust (Mean)", color="red", linestyle="--")
+    plt.fill_between(ticks, trust_lower[:, 2], trust_upper[:, 2], color="red", alpha=0.2)
+    plt.plot(ticks, trust_mean[:, 5], label="Exploratory Friend Trust (Mean)", color="orange", linestyle="--")
+    plt.fill_between(ticks, trust_lower[:, 5], trust_upper[:, 5], color="orange", alpha=0.2)
+
     plt.xlabel("Tick")
     plt.ylabel("Trust")
-    plt.title("Trust Evolution (Exploitative Agents)")
+    plt.title("Trust Evolution (Exploitative & Exploratory Agents)")
     plt.legend()
     plt.show()
 
